@@ -28,11 +28,21 @@ public sealed class CheckpointStore
         await File.WriteAllTextAsync(_filePath, json, ct);
     }
 
-    public CheckpointEntry? Get(string grafanaUid) =>
-        _entries.TryGetValue(grafanaUid, out var entry) ? entry : null;
+    public CheckpointEntry? Get(string key) =>
+        _entries.TryGetValue(key, out var entry) ? entry : null;
 
+    /// <summary>
+    /// Stores an entry under its Grafana UID. Used by the migrate flow, where the UID is unique per run.
+    /// </summary>
     public void Upsert(CheckpointEntry entry) =>
-        _entries[entry.GrafanaUid] = entry;
+        Upsert(entry.GrafanaUid, entry);
+
+    /// <summary>
+    /// Stores an entry under an explicit key. Used by the import flow, whose key also carries the target
+    /// folder so the same source file imported into two folders gets two independent entries.
+    /// </summary>
+    public void Upsert(string key, CheckpointEntry entry) =>
+        _entries[key] = entry;
 
     public IReadOnlyCollection<CheckpointEntry> All => _entries.Values;
 }

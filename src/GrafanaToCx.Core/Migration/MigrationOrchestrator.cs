@@ -348,6 +348,9 @@ public sealed class MigrationOrchestrator
             Status = entry.Status,
             CxDashboardId = entry.CxDashboardId,
             ErrorMessage = entry.ErrorMessage,
-            ConversionDiagnostics = conversionDiagnostics ?? []
+            // Copy: IGrafanaToCxConverter.ConversionDiagnostics exposes the converter's live backing list,
+            // which is cleared on every ConvertToJObject call. Storing the reference makes all report
+            // entries alias one list, so the built report shows the last dashboard's diagnostics for all.
+            ConversionDiagnostics = conversionDiagnostics?.ToList() ?? []
         };
 }

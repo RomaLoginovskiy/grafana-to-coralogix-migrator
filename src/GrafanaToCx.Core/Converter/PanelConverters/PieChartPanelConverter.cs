@@ -19,6 +19,13 @@ public sealed class PieChartPanelConverter : IPanelConverter
 {
     private static readonly IAggregationMapper AggregationMapper = new AggregationMapper();
 
+    private readonly Action<PanelConversionDiagnostic>? _diagnosticSink;
+
+    public PieChartPanelConverter(Action<PanelConversionDiagnostic>? diagnosticSink = null)
+    {
+        _diagnosticSink = diagnosticSink;
+    }
+
     public JObject? Convert(JObject panel, ISet<string> discoveredMetrics, TransformationPlan? plan = null)
     {
         var targets = PanelTargetSelector.ResolveVisibleTargets(panel, plan);
@@ -39,7 +46,7 @@ public sealed class PieChartPanelConverter : IPanelConverter
         {
             pieQuery = IsElasticsearchTarget(target)
                 ? BuildLogsQuery(target)
-                : BuildMetricsQuery(panel, target, discoveredMetrics);
+                : BuildMetricsQuery(panel, targets, discoveredMetrics);
         }
 
         return new JObject
@@ -107,12 +114,70 @@ public sealed class PieChartPanelConverter : IPanelConverter
         return new JObject { ["logs"] = logsQuery };
     }
 
-    private static JObject BuildMetricsQuery(JObject panel, JObject target, ISet<string> discoveredMetrics)
+    /// <summary>
+    /// Builds the metrics branch, guaranteeing a non-empty <c>groupNames</c>.
+    /// </summary>
+    /// <remarks>
+    /// A Coralogix pie slices by label values, and the API rejects the widget outright with
+    /// <c>group_names cannot be empty</c> when none are supplied. Grafana records the intended grouping in
+    /// three different places, so all three are consulted; when the panel expresses its slices as separate
+    /// scalar queries instead, the queries are consolidated under a synthesized label.
+    /// </remarks>
+    private JObject BuildMetricsQuery(JObject panel, IReadOnlyList<JObject> targets, ISet<string> discoveredMetrics)
     {
-        var expr = target.Value<string>("expr") ?? string.Empty;
-        var promql = QueryHelpers.CleanQuery(expr, discoveredMetrics);
-        var groupName = InferMetricsGroupNameFromDisplayName(panel);
+        var series = targets
+            .Select(t => new PromqlSeriesTarget(
+                QueryHelpers.CleanQuery(t.Value<string>("expr") ?? string.Empty, discoveredMetrics),
+                t.Value<string>("legendFormat")))
+            .Where(t => !string.IsNullOrWhiteSpace(t.Expr))
+            .ToList();
 
+        var groupNames = ResolveGroupNames(panel, series);
+
+        if (groupNames.Count > 0)
+            return BuildMetricsQueryObject(series[0].Expr, groupNames);
+
+        // No label to slice by. Stamp one on with label_replace so each original query becomes a slice,
+        // rather than dropping every target but the first and emitting an unusable empty grouping.
+        var consolidated = PromqlSeriesConsolidator.Consolidate(series);
+        if (consolidated is null)
+            return BuildMetricsQueryObject(series.Count > 0 ? series[0].Expr : string.Empty, []);
+
+        ReportConsolidation(panel, consolidated);
+        return BuildMetricsQueryObject(consolidated.Expr, [consolidated.GroupLabel]);
+    }
+
+    /// <summary>
+    /// Grouping labels, in descending order of how directly they express intent:
+    /// the PromQL <c>by (...)</c> clause, then <c>{{label}}</c> legend references, then the
+    /// <c>${__field.labels.X}</c> display-name template.
+    /// </summary>
+    private static List<string> ResolveGroupNames(JObject panel, IReadOnlyList<PromqlSeriesTarget> series)
+    {
+        var fromByClause = series
+            .SelectMany(s => PromqlGroupNameExtractor.FromByClause(s.Expr))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (fromByClause.Count > 0)
+            return fromByClause;
+
+        var fromLegend = series
+            .SelectMany(s => PromqlGroupNameExtractor.FromLegendFormat(s.Label))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (fromLegend.Count > 0)
+            return fromLegend;
+
+        var fromDisplayName = PromqlGroupNameExtractor.FromDisplayName(
+            panel["fieldConfig"]?["defaults"]?["displayName"]?.ToString());
+
+        return fromDisplayName is null ? [] : [fromDisplayName];
+    }
+
+    private static JObject BuildMetricsQueryObject(string promql, IReadOnlyList<string> groupNames)
+    {
         var metricsQuery = new JObject
         {
             ["promqlQuery"] = new JObject { ["value"] = promql },
@@ -121,30 +186,27 @@ public sealed class PieChartPanelConverter : IPanelConverter
             ["filters"] = new JArray()
         };
 
-        if (!string.IsNullOrWhiteSpace(groupName))
-            metricsQuery["groupNames"] = new JArray(groupName);
+        if (groupNames.Count > 0)
+            metricsQuery["groupNames"] = new JArray(groupNames.Cast<object>().ToArray());
 
-        return new JObject
-        {
-            ["metrics"] = metricsQuery
-        };
+        return new JObject { ["metrics"] = metricsQuery };
     }
 
-    private static string? InferMetricsGroupNameFromDisplayName(JObject panel)
+    private void ReportConsolidation(JObject panel, PromqlConsolidationResult consolidated)
     {
-        const string labelPrefix = "${__field.labels.";
-        const string suffix = "}";
+        if (_diagnosticSink is null || consolidated.SeriesCount < 2)
+            return;
 
-        var displayName = panel["fieldConfig"]?["defaults"]?["displayName"]?.ToString();
-        if (string.IsNullOrWhiteSpace(displayName))
-            return null;
-
-        if (!displayName.StartsWith(labelPrefix, StringComparison.Ordinal) ||
-            !displayName.EndsWith(suffix, StringComparison.Ordinal))
-            return null;
-
-        var label = displayName[labelPrefix.Length..^suffix.Length].Trim();
-        return string.IsNullOrWhiteSpace(label) ? null : label;
+        _diagnosticSink(new PanelConversionDiagnostic(
+            panel.Value<string>("title") ?? string.Empty,
+            "piechart",
+            "approximated",
+            $"Panel had no group-by label; {consolidated.SeriesCount} queries were merged into one and " +
+            $"grouped by a synthesized '{consolidated.GroupLabel}' label taken from each query's legend.",
+            "DGR-PIE-010",
+            [],
+            "promql-label-replace-consolidation",
+            0.9));
     }
 
     private static bool IsElasticsearchTarget(JObject target)

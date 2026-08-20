@@ -36,7 +36,7 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     private readonly GaugePanelConverter _gaugeConverter = new();
     private readonly MarkdownPanelConverter _markdownConverter = new();
     private readonly LogsPanelConverter _logsPanelConverter = new();
-    private readonly PieChartPanelConverter _pieChartConverter = new();
+    private readonly PieChartPanelConverter _pieChartConverter;
     private readonly BarChartPanelConverter _barChartConverter = new();
     private readonly DataTablePanelConverter _dataTableConverter = new();
     private readonly CompositeTransformationPlanner _transformationPlanner;
@@ -52,6 +52,7 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     {
         _logger = logger;
         _transformationPlanner = new CompositeTransformationPlanner(mergeOptions ?? MultiLuceneMergeOptions.Disabled);
+        _pieChartConverter = new PieChartPanelConverter(AddDiagnostic);
     }
 
     public string Convert(string grafanaJson, ConversionOptions? options = null)

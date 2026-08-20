@@ -23,7 +23,7 @@ public sealed class QueryShapeValidator : IQueryShapeValidator
         if (token is JObject obj)
         {
             if (obj["pieChart"]?["query"] is JObject pieQuery)
-                ValidateQueryObject(pieQuery, $"{path}.pieChart.query", errors);
+                ValidateQueryObject(pieQuery, $"{path}.pieChart.query", errors, requireMetricsGroupNames: true);
 
             if (obj["barChart"]?["query"] is JObject barQuery)
                 ValidateQueryObject(barQuery, $"{path}.barChart.query", errors);
@@ -56,7 +56,16 @@ public sealed class QueryShapeValidator : IQueryShapeValidator
         }
     }
 
-    private static void ValidateQueryObject(JObject query, string path, List<QueryShapeValidationError> errors)
+    /// <param name="requireMetricsGroupNames">
+    /// Set for pie charts only. The API rejects a pie chart metrics query that carries no group names
+    /// ("group_names cannot be empty") because a pie has nothing to slice by without one. Bar charts and
+    /// gauges accept an empty grouping, so the rule is scoped rather than applied to every metrics branch.
+    /// </param>
+    private static void ValidateQueryObject(
+        JObject query,
+        string path,
+        List<QueryShapeValidationError> errors,
+        bool requireMetricsGroupNames = false)
     {
         var hasLogs = query["logs"] is JObject;
         var hasMetrics = query["metrics"] is JObject;
@@ -92,6 +101,9 @@ public sealed class QueryShapeValidator : IQueryShapeValidator
 
             if (metrics["filters"] is not JArray)
                 errors.Add(new QueryShapeValidationError(path, "metrics.filters must be an array."));
+
+            if (requireMetricsGroupNames && metrics["groupNames"] is not JArray { Count: > 0 })
+                errors.Add(new QueryShapeValidationError(path, "metrics.groupNames must be a non-empty array."));
         }
 
         if (hasDataprime && query["dataprime"] is JObject dataprime)

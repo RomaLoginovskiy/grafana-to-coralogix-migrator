@@ -8,8 +8,6 @@ namespace GrafanaToCx.Cli.Cli;
 /// </summary>
 public static class PromptMenus
 {
-    private const string KnownRegions = "eu1, eu2, us1, us2, ap1, ap2, ap3, in1";
-
     public sealed record MainMenuItem(string Key, string Label)
     {
         public override string ToString() => $"{Key}. {Label}";
@@ -23,6 +21,7 @@ public static class PromptMenus
         new("4", "Migrate – Bulk migrate from Grafana"),
         new("5", "Settings – Change connection settings"),
         new("6", "Cleanup – Backup and delete dashboards by folder"),
+        new("7", "Grafana Import – Publish local dashboards to hosted Grafana"),
         new("0", "Exit")
     ];
 
@@ -54,18 +53,18 @@ public static class PromptMenus
 
     private static SessionConfig ChangeRegion(SessionConfig current)
     {
-        var regionInput = Prompt.Input<string>($"Coralogix region ({KnownRegions})", defaultValue: "eu2");
-        try
+        // Seeded with the session's own region, so re-entering this menu shows where you already are.
+        var region = PromptInput.PromptRegion("Coralogix region", current.Region);
+        if (region is null)
         {
-            var newEndpoint = RegionMapper.Resolve(regionInput ?? string.Empty);
-            Console.WriteLine($"Endpoint updated to: {newEndpoint}");
-            return current with { CxEndpoint = newEndpoint };
-        }
-        catch (ArgumentException)
-        {
-            Console.Error.WriteLine($"Unknown region '{regionInput}'. Keeping current endpoint.");
+            Console.Error.WriteLine("No region selected — keeping current endpoint.");
             return current;
         }
+
+        var newEndpoint = RegionMapper.Resolve(region);
+
+        Console.WriteLine($"Endpoint updated to: {newEndpoint}");
+        return current with { CxEndpoint = newEndpoint, Region = region };
     }
 
     private static SessionConfig ChangeApiKey(SessionConfig current)

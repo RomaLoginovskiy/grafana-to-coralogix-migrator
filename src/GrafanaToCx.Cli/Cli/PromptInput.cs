@@ -8,22 +8,24 @@ namespace GrafanaToCx.Cli.Cli;
 /// </summary>
 public static class PromptInput
 {
-    private const string KnownRegions = "eu1, eu2, us1, us2, ap1, ap2, ap3, in1";
+    /// <summary>Used when neither the settings file nor the caller names a region.</summary>
+    private const string FallbackRegion = "eu2";
 
-    public static SessionConfig? PromptSessionConfig()
+    /// <param name="defaultRegion">
+    /// Region to pre-select, normally <c>coralogix.region</c> from the settings file. Unknown or missing
+    /// values fall back to <see cref="FallbackRegion"/> rather than failing the session.
+    /// </param>
+    public static SessionConfig? PromptSessionConfig(string? defaultRegion = null)
     {
-        var regionInput = Prompt.Input<string>($"Coralogix region ({KnownRegions})", defaultValue: "eu2");
-
-        string cxEndpoint;
-        try
+        var region = PromptRegion("Coralogix region", defaultRegion);
+        if (region is null)
         {
-            cxEndpoint = RegionMapper.Resolve(regionInput ?? string.Empty);
-        }
-        catch (ArgumentException)
-        {
-            Console.Error.WriteLine($"Unknown region '{regionInput}'. Valid: {KnownRegions}");
+            Console.Error.WriteLine("No region selected.");
             return null;
         }
+
+        // Every choice comes from RegionMapper.KnownRegions, so resolution cannot fail here.
+        var cxEndpoint = RegionMapper.Resolve(region);
 
         var apiKey = Environment.GetEnvironmentVariable("CX_API_KEY");
         if (string.IsNullOrWhiteSpace(apiKey))
@@ -41,7 +43,7 @@ public static class PromptInput
         }
 
         Console.WriteLine($"Connected to: {cxEndpoint}");
-        return new SessionConfig(cxEndpoint, apiKey);
+        return new SessionConfig(cxEndpoint, apiKey, GrafanaApiKey: null, Region: region);
     }
 
     public static string PromptPassword(string message)
@@ -54,9 +56,19 @@ public static class PromptInput
         return Prompt.Password(message);
     }
 
-    public static string PromptRegion(string message, string defaultValue = "eu2")
+    /// <summary>
+    /// Picks a region from <see cref="RegionMapper.KnownRegions"/>. Any answer is resolvable, so callers
+    /// never have to handle a typo — the previous free-text prompt could abort a session on one.
+    /// </summary>
+    /// <param name="defaultValue">
+    /// Pre-selected region. Unknown or missing values fall back to <see cref="FallbackRegion"/>.
+    /// </param>
+    /// <returns>The chosen region, or null when the operator declined or gave no valid answer.</returns>
+    public static string? PromptRegion(string message, string? defaultValue = null)
     {
-        return Prompt.Input<string>(message, defaultValue);
+        var preselected = RegionMapper.Normalize(defaultValue) ?? FallbackRegion;
+        return SelectOneWithFallback.SelectOne(
+            message, RegionMapper.KnownRegions, region => region, preselected);
     }
 
     public static bool PromptConfirm(string message, bool defaultValue = false)

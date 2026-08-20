@@ -36,7 +36,12 @@ public sealed class VariableConverter
             }
             catch (Exception ex)
             {
-                _logger.LogDebug("Failed to convert variable: {Error}", ex.Message);
+                // Warning, not Debug: a dropped variable leaves every ${name} reference in the dashboard's
+                // queries unresolved, so it must not disappear quietly.
+                _logger.LogWarning(
+                    "Dropped dashboard variable '{Variable}': {Error}",
+                    varToken.Value<string>("name") ?? "(unnamed)",
+                    ex.Message);
             }
         }
 
@@ -108,9 +113,18 @@ public sealed class VariableConverter
         var includeAll = varToken.Value<bool?>("includeAll") ?? false;
         var multi = varToken.Value<bool?>("multi") ?? false;
         var current = varToken["current"] as JObject ?? new JObject();
-        var currentValue = current.Value<string>("value") ?? string.Empty;
-        var currentLabel = current.Value<string>("text") ?? string.Empty;
+
+        // A multi-select variable stores current.value as an array. Reading it with Value<string> throws,
+        // and the caller's catch turned that into a silently dropped variable — leaving every ${var}
+        // reference in the dashboard's queries dangling.
+        var currentValueToken = current["value"];
+        var currentValue = ExtractSingleValue(currentValueToken);
+        var currentLabel = ExtractSingleValue(current["text"]);
+        if (string.IsNullOrWhiteSpace(currentLabel))
+            currentLabel = currentValue;
+
         var useMulti = includeAll || multi
+            || currentValueToken is JArray
             || string.IsNullOrEmpty(currentValue)
             || currentValue == "$__all";
 
@@ -270,7 +284,9 @@ public sealed class VariableConverter
     private static JObject ConvertIntervalVariable(JObject varToken, string name)
     {
         var current = varToken["current"] as JObject ?? new JObject();
-        var currentValue = current.Value<string>("value") ?? "5m";
+        var currentValue = ExtractSingleValue(current["value"]);
+        if (string.IsNullOrWhiteSpace(currentValue))
+            currentValue = "5m";
 
         return new JObject
         {
@@ -368,9 +384,15 @@ public sealed class VariableConverter
         var includeAll = varToken.Value<bool?>("includeAll") ?? false;
         var multi = varToken.Value<bool?>("multi") ?? false;
         var current = varToken["current"] as JObject ?? new JObject();
-        var currentValue = current.Value<string>("value") ?? string.Empty;
-        var currentLabel = current.Value<string>("text") ?? string.Empty;
-        var useMulti = includeAll || multi || string.IsNullOrEmpty(currentValue);
+
+        // Same multi-select array hazard as the metrics path above.
+        var currentValueToken = current["value"];
+        var currentValue = ExtractSingleValue(currentValueToken);
+        var currentLabel = ExtractSingleValue(current["text"]);
+        if (string.IsNullOrWhiteSpace(currentLabel))
+            currentLabel = currentValue;
+
+        var useMulti = includeAll || multi || currentValueToken is JArray || string.IsNullOrEmpty(currentValue);
         var keypath = new JArray(fieldName.Split('.').Cast<object>().ToArray());
 
         return new JObject

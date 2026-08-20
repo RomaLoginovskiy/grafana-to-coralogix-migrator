@@ -184,4 +184,147 @@ public class VariableConverterTests
         Assert.Equal("VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE", convertedVariable!["displayType"]?.ToString());
         Assert.NotNull(convertedVariable["source"]?["query"]?["logsQuery"]?["type"]?["fieldValue"]);
     }
+
+    // Multi-select variables store current.value as an array. Reading it as a string throws, and the
+    // converter's catch turned that into a silently dropped variable — leaving every ${name} reference
+    // in the dashboard's queries unresolved.
+
+    [Fact]
+    public void ConvertToJObject_MultiSelectLabelValuesVariable_IsNotDropped()
+    {
+        var converter = CreateConverter();
+        var grafanaVariable = new JObject
+        {
+            ["name"] = "job",
+            ["type"] = "query",
+            ["label"] = "Job",
+            ["multi"] = true,
+            ["query"] = new JObject
+            {
+                ["query"] = "label_values(job)",
+                ["refId"] = "StandardVariableQuery"
+            },
+            ["current"] = new JObject
+            {
+                ["selected"] = true,
+                ["text"] = new JArray { "ep-connect-general-01-metric" },
+                ["value"] = new JArray { "ep-connect-general-01-metric" }
+            }
+        };
+
+        var dashboard = converter.ConvertToJObject(BuildDashboardJsonWithVariables(grafanaVariable));
+
+        var converted = GetVariable(dashboard, "job");
+        Assert.NotNull(converted);
+        Assert.Equal("Job", converted!["displayName"]?.ToString());
+        Assert.Equal("job", converted["source"]?["query"]?["metricsQuery"]?["type"]?["labelValue"]?["labelName"]?["stringValue"]?.ToString());
+        Assert.NotNull(converted["value"]?["multiString"]);
+    }
+
+    [Fact]
+    public void ConvertToJObject_MultiSelectVariableWithTwoArgLabelValues_KeepsMetricAndLabel()
+    {
+        var converter = CreateConverter();
+        var grafanaVariable = new JObject
+        {
+            ["name"] = "topic",
+            ["type"] = "query",
+            ["multi"] = true,
+            ["query"] = new JObject { ["query"] = "label_values(kafka_log_log_value, topic)" },
+            ["current"] = new JObject
+            {
+                ["text"] = new JArray { "EVT_A", "EVT_B" },
+                ["value"] = new JArray { "EVT_A", "EVT_B" }
+            }
+        };
+
+        var dashboard = converter.ConvertToJObject(BuildDashboardJsonWithVariables(grafanaVariable));
+
+        var labelValue = GetVariable(dashboard, "topic")?["source"]?["query"]?["metricsQuery"]?["type"]?["labelValue"];
+        Assert.NotNull(labelValue);
+        Assert.Equal("kafka_log_log_value", labelValue!["metricName"]?["stringValue"]?.ToString());
+        Assert.Equal("topic", labelValue["labelName"]?["stringValue"]?.ToString());
+    }
+
+    [Fact]
+    public void ConvertToJObject_SingleSelectLabelValuesVariable_StillUsesSingleStringValue()
+    {
+        var converter = CreateConverter();
+        var grafanaVariable = new JObject
+        {
+            ["name"] = "ConnectorGroup",
+            ["type"] = "query",
+            ["multi"] = false,
+            ["query"] = new JObject { ["query"] = "label_values(kafka_connect_connector_status, connector)" },
+            ["current"] = new JObject
+            {
+                ["selected"] = false,
+                ["text"] = "REGION-A-SINK",
+                ["value"] = "REGION-A-SINK"
+            }
+        };
+
+        var dashboard = converter.ConvertToJObject(BuildDashboardJsonWithVariables(grafanaVariable));
+
+        var value = GetVariable(dashboard, "ConnectorGroup")?["value"];
+        Assert.NotNull(value);
+        Assert.Null(value!["multiString"]);
+        Assert.Equal("REGION-A-SINK", value["singleString"]?["value"]?["value"]?.ToString());
+    }
+
+    [Fact]
+    public void ConvertToJObject_MultiSelectElasticsearchTermsVariable_IsNotDropped()
+    {
+        var converter = CreateConverter();
+        var grafanaVariable = new JObject
+        {
+            ["name"] = "service",
+            ["type"] = "query",
+            ["multi"] = true,
+            ["query"] = new JObject { ["find"] = "terms", ["field"] = "service.name.keyword" },
+            ["current"] = new JObject
+            {
+                ["text"] = new JArray { "checkout" },
+                ["value"] = new JArray { "checkout" }
+            }
+        };
+
+        var dashboard = converter.ConvertToJObject(BuildDashboardJsonWithVariables(grafanaVariable));
+
+        var converted = GetVariable(dashboard, "service");
+        Assert.NotNull(converted);
+        Assert.NotNull(converted!["source"]?["query"]?["logsQuery"]?["type"]?["fieldValue"]);
+        Assert.NotNull(converted["value"]?["multiString"]);
+    }
+
+    /// <summary>
+    /// Every variable referenced by a query must exist, or the Coralogix dashboard renders with an
+    /// unresolved placeholder and no picker.
+    /// </summary>
+    [Fact]
+    public void ConvertToJObject_AllSourceVariables_SurviveConversion()
+    {
+        var converter = CreateConverter();
+
+        JObject MultiQueryVariable(string name, string query) => new()
+        {
+            ["name"] = name,
+            ["type"] = "query",
+            ["multi"] = true,
+            ["query"] = new JObject { ["query"] = query },
+            ["current"] = new JObject { ["text"] = new JArray { "a" }, ["value"] = new JArray { "a" } }
+        };
+
+        var dashboard = converter.ConvertToJObject(BuildDashboardJsonWithVariables(
+            MultiQueryVariable("topic", "label_values(kafka_log_log_value, topic)"),
+            MultiQueryVariable("job", "label_values(job)"),
+            MultiQueryVariable("connector", "label_values(kafka_connect_connector_status, connector)"),
+            new JObject { ["name"] = "Filters", ["type"] = "adhoc" }));
+
+        foreach (var name in new[] { "topic", "job", "connector" })
+            Assert.NotNull(GetVariable(dashboard, name));
+
+        // adhoc has no Coralogix equivalent and is intentionally skipped.
+        Assert.Null(GetVariable(dashboard, "Filters"));
+    }
 }
