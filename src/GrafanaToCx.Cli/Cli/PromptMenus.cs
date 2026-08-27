@@ -22,6 +22,7 @@ public static class PromptMenus
         new("5", "Settings – Change connection settings"),
         new("6", "Cleanup – Backup and delete dashboards by folder"),
         new("7", "Backup – Download Grafana dashboards to a local ZIP"),
+        new("8", "Grafana Import – Publish dashboards to Coralogix-hosted Grafana"),
         new("0", "Exit")
     ];
 

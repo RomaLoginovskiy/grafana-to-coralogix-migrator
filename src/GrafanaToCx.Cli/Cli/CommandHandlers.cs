@@ -870,10 +870,10 @@ public sealed class CommandHandlers
                     await RunCleanupFoldersMenuAsync(config, session);
                     break;
                 case "7":
-                    await RunGrafanaImportMenuAsync(config, settingsFile, session);
-                    break;
-                case "7":
                     await RunBackupMenuAsync(settingsFile);
+                    break;
+                case "8":
+                    await RunGrafanaImportMenuAsync(config, settingsFile, session);
                     break;
                 case "0":
                     await store.SaveAsync(session);
@@ -884,7 +884,7 @@ public sealed class CommandHandlers
                     Console.WriteLine("Goodbye.");
                     return 0;
                 default:
-                    Console.Error.WriteLine($"Unknown option '{selected.Key}'. Enter 0–7.");
+                    Console.Error.WriteLine($"Unknown option '{selected.Key}'. Enter 0–8.");
                     break;
             }
 
@@ -1061,7 +1061,7 @@ public sealed class CommandHandlers
             interactive: true);
     }
 
-    private async Task RunCleanupFoldersMenuAsync(SessionConfig config)
+    private async Task RunCleanupFoldersMenuAsync(SessionConfig config, InteractiveSession session)
     {
         using var foldersClient = new CoralogixFoldersClient(
             _loggerFactory.CreateLogger<CoralogixFoldersClient>(), config.CxEndpoint, config.CxApiKey);

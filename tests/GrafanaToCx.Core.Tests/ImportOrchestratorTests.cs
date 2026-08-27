@@ -539,6 +539,7 @@ public sealed class ImportOrchestratorTests
         public ConversionOptions? LastOptions { get; private set; }
 
         public IReadOnlyList<PanelConversionDiagnostic> ConversionDiagnostics => _diagnostics;
+        public IReadOnlyList<DashboardConversionDiagnostic> DashboardDiagnostics => [];
         public IReadOnlyList<JObject> ConversionDecisionEvents => [];
 
         public string Convert(string grafanaJson, ConversionOptions? options = null) =>

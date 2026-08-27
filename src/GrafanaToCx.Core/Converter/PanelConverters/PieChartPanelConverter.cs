@@ -46,7 +46,7 @@ public sealed class PieChartPanelConverter : IPanelConverter
         {
             var built = IsElasticsearchTarget(target)
                 ? BuildLogsQuery(target)
-                : BuildMetricsQuery(panel, target, discoveredMetrics);
+                : BuildMetricsQuery(panel, targets, discoveredMetrics);
 
             // An ungrouped metrics query cannot make a pie chart; let the converter skip the
             // panel and report it rather than emitting something the API will reject.
@@ -121,7 +121,7 @@ public sealed class PieChartPanelConverter : IPanelConverter
         return new JObject { ["logs"] = logsQuery };
     }
 
-    private static JObject? BuildMetricsQuery(JObject panel, JObject target, ISet<string> discoveredMetrics)
+    private JObject? BuildMetricsQuery(JObject panel, IReadOnlyList<JObject> targets, ISet<string> discoveredMetrics)
     {
         var series = targets
             .Select(t => new PromqlSeriesTarget(
@@ -138,8 +138,11 @@ public sealed class PieChartPanelConverter : IPanelConverter
         // No label to slice by. Stamp one on with label_replace so each original query becomes a slice,
         // rather than dropping every target but the first and emitting an unusable empty grouping.
         var consolidated = PromqlSeriesConsolidator.Consolidate(series);
+
+        // Nothing usable to chart. Coralogix rejects a metrics pie with empty group_names, so signal
+        // upward and let the caller skip the panel rather than emit a widget that fails validation.
         if (consolidated is null)
-            return BuildMetricsQueryObject(series.Count > 0 ? series[0].Expr : string.Empty, []);
+            return null;
 
         ReportConsolidation(panel, consolidated);
         return BuildMetricsQueryObject(consolidated.Expr, [consolidated.GroupLabel]);
@@ -181,25 +184,9 @@ public sealed class PieChartPanelConverter : IPanelConverter
             ["promqlQuery"] = new JObject { ["value"] = promql },
             ["aggregation"] = "AGGREGATION_LAST",
             ["editorMode"] = "METRICS_QUERY_EDITOR_MODE_TEXT",
-            ["filters"] = new JArray()
+            ["filters"] = new JArray(),
+            ["groupNames"] = new JArray(groupNames)
         };
-
-        // Coralogix rejects a metrics pie chart with empty group_names, so fall back to the
-        // PromQL grouping clause when the legend format does not name a label.
-        var groupNames = new JArray();
-        if (!string.IsNullOrWhiteSpace(groupName))
-            groupNames.Add(groupName);
-        else
-            foreach (var label in ExtractPromqlGroupingLabels(promql))
-                groupNames.Add(label);
-
-        // No grouping anywhere means a single scalar — one slice, which Coralogix rejects
-        // outright. Signal that upward rather than emitting a widget that fails validation
-        // and takes the whole dashboard down with it.
-        if (groupNames.Count == 0)
-            return null;
-
-        metricsQuery["groupNames"] = groupNames;
 
         return new JObject { ["metrics"] = metricsQuery };
     }
@@ -228,7 +215,11 @@ public sealed class PieChartPanelConverter : IPanelConverter
             .ToList();
     }
 
-    private static string? InferMetricsGroupNameFromDisplayName(JObject panel)
+    /// <summary>
+    /// Reports that several queries were merged under a synthesized label. Only worth reporting when
+    /// more than one query was folded together; a single query keeps its original meaning.
+    /// </summary>
+    private void ReportConsolidation(JObject panel, PromqlConsolidationResult consolidated)
     {
         if (_diagnosticSink is null || consolidated.SeriesCount < 2)
             return;
@@ -277,7 +268,7 @@ public sealed class PieChartPanelConverter : IPanelConverter
             },
             ["filters"] = new JArray()
         };
-        
+
         // PieChart.query uses oneof semantics in API contract; keep only dataprime.
         return new JObject
         {

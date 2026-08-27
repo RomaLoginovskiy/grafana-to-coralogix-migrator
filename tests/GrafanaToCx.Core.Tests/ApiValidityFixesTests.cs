@@ -62,9 +62,11 @@ public class ApiValidityFixesTests
     // ── pie chart with nothing to group by ───────────────────────────────────
 
     [Fact]
-    public void UngroupedMetricsPieChart_IsSkipped_NotEmittedInvalid()
+    public void UngroupedMetricsPieChart_IsConsolidated_NotSkipped()
     {
-        // A pie over a scalar has one slice; Coralogix rejects empty group_names outright.
+        // Coralogix rejects empty group_names outright. This panel used to be dropped for that reason;
+        // PromqlSeriesConsolidator now stamps a synthetic "series" label on with label_replace, which
+        // satisfies the API without losing the panel. Skipping is no longer the right answer.
         var converted = Convert(new JObject
         {
             ["title"] = "Board",
@@ -81,7 +83,12 @@ public class ApiValidityFixesTests
             .SelectMany(r => (r["widgets"] as JArray ?? []).Children<JObject>())
             .ToList();
 
-        Assert.DoesNotContain(widgets, w => w["definition"]?["pieChart"] is not null);
+        var pie = Assert.Single(widgets, w => w["definition"]?["pieChart"] is not null);
+
+        // The payload must still be valid: a non-empty grouping is what the API actually enforces.
+        var groupNames = pie["definition"]?["pieChart"]?["query"]?["metrics"]?["groupNames"] as JArray;
+        Assert.NotNull(groupNames);
+        Assert.NotEmpty(groupNames!);
     }
 
     [Fact]
