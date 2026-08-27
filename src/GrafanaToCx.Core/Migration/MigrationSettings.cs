@@ -6,6 +6,18 @@ public sealed class MigrationSettings
     public CoralogixSettings Coralogix { get; init; } = new();
     public MigrationCredentialsSettings Credentials { get; init; } = new();
     public MigrationRunSettings Migration { get; init; } = new();
+
+    /// <summary>
+    /// Settings for the local-file <c>import</c> flow. Deliberately separate from <see cref="Migration"/>
+    /// so import never shares a checkpoint file with migrate.
+    /// </summary>
+    public ImportSettings Import { get; init; } = new();
+
+    /// <summary>
+    /// Settings for the <c>grafana-import</c> flow, which publishes local dashboard exports into a
+    /// Coralogix-hosted Grafana. Separate from <see cref="Import"/> so the two never share a checkpoint.
+    /// </summary>
+    public GrafanaImportSettings GrafanaImport { get; init; } = new();
 }
 
 public sealed class MigrationCredentialsSettings

@@ -3,6 +3,7 @@ using GrafanaToCx.Core.ApiClient;
 using GrafanaToCx.Core.Assessment;
 using GrafanaToCx.Core.Converter;
 using GrafanaToCx.Core.Converter.Transformations;
+using GrafanaToCx.Core.GrafanaToGrafana;
 using GrafanaToCx.Core.Migration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -204,7 +205,11 @@ public sealed class CommandHandlers
 
     // ── Verify ──────────────────────────────────────────────────────────────
 
-    public async Task<int> RunVerifyAsync(string input, string endpoint, string? dashboardId)
+    /// <param name="endpoint">
+    /// Null is legal when <paramref name="dashboardId"/> is absent — the local-only report never calls
+    /// Coralogix, so callers are not made to resolve a region they will not use.
+    /// </param>
+    public async Task<int> RunVerifyAsync(string input, string? endpoint, string? dashboardId)
     {
         if (!File.Exists(input))
         {
@@ -240,6 +245,12 @@ public sealed class CommandHandlers
             Console.WriteLine();
             Console.WriteLine("No --dashboard-id provided. Skipping CX comparison.");
             return 0;
+        }
+
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            Console.Error.WriteLine("Error: --dashboard-id requires a Coralogix endpoint or region.");
+            return 1;
         }
 
         var cxApiKey = Environment.GetEnvironmentVariable("CX_API_KEY");
@@ -455,7 +466,11 @@ public sealed class CommandHandlers
 
     // ── Migrate ──────────────────────────────────────────────────────────────
 
-    public async Task<int> RunMigrateAsync(string settingsFile, bool interactive)
+    /// <param name="cxEndpointOverride">
+    /// Wins over the settings region when set. Carries an explicit --endpoint/--region, or the region the
+    /// operator picked at the start of an interactive session.
+    /// </param>
+    public async Task<int> RunMigrateAsync(string settingsFile, bool interactive, string? cxEndpointOverride = null)
     {
         if (interactive)
             return await RunInteractiveConsoleAsync(settingsFile);
@@ -490,10 +505,14 @@ public sealed class CommandHandlers
             return 1;
         }
 
-        return await ExecuteMigrationAsync(settingsFile, grafanaApiKey, cxApiKey, promptInteractive: false);
+        return await ExecuteMigrationAsync(
+            settingsFile, grafanaApiKey, cxApiKey, promptInteractive: false, cxEndpointOverride);
     }
 
-    public async Task<int> ExecuteMigrationAsync(string settingsFile, string grafanaApiKey, string cxApiKey, bool promptInteractive)
+    /// <inheritdoc cref="RunMigrateAsync"/>
+    public async Task<int> ExecuteMigrationAsync(
+        string settingsFile, string grafanaApiKey, string cxApiKey, bool promptInteractive,
+        string? cxEndpointOverride = null)
     {
         if (!File.Exists(settingsFile))
         {
@@ -512,7 +531,10 @@ public sealed class CommandHandlers
         string grafanaEndpoint;
         try
         {
-            cxEndpoint = RegionMapper.Resolve(settings.Coralogix.Region);
+            cxEndpoint = cxEndpointOverride ?? RegionMapper.Resolve(settings.Coralogix.Region);
+
+            // Not overridable from the Coralogix side: grafana.region locates the *source* Grafana, a
+            // different system, so the region picked for the destination says nothing about it.
             grafanaEndpoint = RegionMapper.ResolveGrafana(settings.Grafana.Region);
         }
         catch (ArgumentException ex)
@@ -778,16 +800,44 @@ public sealed class CommandHandlers
 
     // ── Interactive console ───────────────────────────────────────────────────
 
-    public async Task<int> RunInteractiveConsoleAsync(string settingsFile)
+    /// <param name="store">Persists <paramref name="session"/> after each completed action.</param>
+    /// <param name="session">
+    /// Answers to offer back as prompt defaults. Mutated in place by the handlers as new answers come in.
+    /// Null starts an unremembered session, which is what the non-interactive callers want.
+    /// </param>
+    /// <param name="resumed">Whether <paramref name="session"/> came off disk, purely for the banner.</param>
+    public async Task<int> RunInteractiveConsoleAsync(
+        string settingsFile,
+        SessionStore? store = null,
+        InteractiveSession? session = null,
+        bool resumed = false)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.WriteLine("╔══════════════════════════════════════════╗");
         Console.WriteLine("║  Grafana → Coralogix Dashboard Converter ║");
         Console.WriteLine("╚══════════════════════════════════════════╝");
+
+        store ??= new SessionStore();
+        session ??= store.Create();
+
+        Console.WriteLine(resumed
+            ? $"  Resumed session {session.Id} — your previous answers are offered as defaults."
+            : $"  Session {session.Id}");
         Console.WriteLine();
 
-        var config = PromptInput.PromptSessionConfig();
+        session.SettingsFile = settingsFile;
+
+        // The remembered region outranks the settings file: it is the newer statement of intent, and an
+        // operator who switched tenants mid-session and came back should not be silently pointed at the
+        // one the file names.
+        var settings = LoadSettings(settingsFile);
+        var seedRegion = session.Region ?? settings.Coralogix.Region;
+
+        var config = PromptInput.PromptSessionConfig(seedRegion);
         if (config is null) return 1;
+
+        session.Region = config.Region;
+        await store.SaveAsync(session);
 
         while (true)
         {
@@ -799,75 +849,185 @@ public sealed class CommandHandlers
             switch (selected.Key)
             {
                 case "1":
-                    await RunConvertMenuAsync();
+                    await RunConvertMenuAsync(session);
                     break;
                 case "2":
-                    await RunPushMenuAsync(config);
+                    await RunPushMenuAsync(config, session);
                     break;
                 case "3":
-                    await RunImportMenuAsync(config);
+                    await RunImportMenuAsync(config, settingsFile, session);
                     break;
                 case "4":
-                    await RunMigrateMenuAsync(config, settingsFile);
+                    // Reassigns because the migrate menu can change both the settings file and the
+                    // remembered Grafana key, and the loop must carry both forward.
+                    (config, settingsFile) = await RunMigrateMenuAsync(config, settingsFile, session);
                     break;
                 case "5":
                     config = PromptMenus.RunSettingsMenu(config);
+                    session.Region = config.Region;
                     break;
                 case "6":
-                    await RunCleanupFoldersMenuAsync(config);
+                    await RunCleanupFoldersMenuAsync(config, session);
+                    break;
+                case "7":
+                    await RunGrafanaImportMenuAsync(config, settingsFile, session);
                     break;
                 case "7":
                     await RunBackupMenuAsync(settingsFile);
                     break;
                 case "0":
+                    await store.SaveAsync(session);
+                    Console.WriteLine();
+                    Console.WriteLine($"Session saved as {session.Id}.");
+                    Console.WriteLine($"  Resume it with:  grafana-to-cx --resume {session.Id}");
+                    Console.WriteLine("  Or the most recent with:  grafana-to-cx --continue");
                     Console.WriteLine("Goodbye.");
                     return 0;
                 default:
                     Console.Error.WriteLine($"Unknown option '{selected.Key}'. Enter 0–7.");
                     break;
             }
+
+            // After every action, not only at exit: an action that fails returns to this menu, and a
+            // Ctrl-C from here would otherwise discard everything just answered.
+            session.SettingsFile = settingsFile;
+            await store.SaveAsync(session);
         }
     }
 
-    private async Task RunConvertMenuAsync()
+    /// <summary>
+    /// Asks for a path, offering <paramref name="remembered"/> as the default when there is one.
+    /// </summary>
+    /// <remarks>
+    /// The validator and the default are mutually exclusive on purpose: Sharprompt runs
+    /// <see cref="Validators.Required"/> against the empty string the operator submits when accepting a
+    /// default, so keeping it would reject the very value being offered. With a default present the
+    /// prompt cannot come back empty anyway, so nothing is lost.
+    /// </remarks>
+    private static string AskPath(string message, string? remembered) =>
+        string.IsNullOrWhiteSpace(remembered)
+            ? Prompt.Input<string>(message, validators: [Validators.Required()])
+            : Prompt.Input<string>(message, defaultValue: remembered);
+
+    private async Task RunConvertMenuAsync(InteractiveSession session)
     {
-        var input = Prompt.Input<string>("Input file or directory", validators: [Validators.Required()]);
-        var output = Prompt.Input<string>("Output path (Enter = default)", defaultValue: string.Empty);
+        var input = AskPath("Input file or directory", session.ConvertInput);
+        var output = Prompt.Input<string>(
+            "Output path (Enter = default)", defaultValue: session.ConvertOutput ?? string.Empty);
+
+        session.ConvertInput = input;
+        session.ConvertOutput = string.IsNullOrEmpty(output) ? null : output;
+
         await RunConvertAsync(input, string.IsNullOrEmpty(output) ? null : output);
     }
 
-    private async Task RunPushMenuAsync(SessionConfig config)
+    private async Task RunPushMenuAsync(SessionConfig config, InteractiveSession session)
     {
-        var input = Prompt.Input<string>("Input Grafana JSON file", validators: [Validators.Required()]);
+        var input = AskPath("Input Grafana JSON file", session.PushInput);
+        session.PushInput = input;
+
         await RunPushAsync(input, config.CxEndpoint, config.CxApiKey,
             folderId: null, folderName: null, nameOverride: null, interactive: true);
     }
 
-    private async Task RunImportMenuAsync(SessionConfig config)
+    private async Task RunImportMenuAsync(SessionConfig config, string settingsFile, InteractiveSession session)
     {
-        var dir = Prompt.Input<string>("Root directory", defaultValue: ".");
-        await RunImportAsync(dir, config.CxEndpoint, config.CxApiKey, interactive: true);
+        var dir = Prompt.Input<string>("Root directory", defaultValue: session.ImportRootDir ?? ".");
+        session.ImportRootDir = dir;
+
+        await RunImportAsync(dir, config.CxEndpoint, config.CxApiKey, interactive: true, settingsFile);
     }
 
-    private async Task RunMigrateMenuAsync(SessionConfig config, string settingsFile)
+    /// <remarks>
+    /// The session's Coralogix endpoint is the REST API base (<c>/mgmt/openapi/latest</c>), so it cannot be
+    /// reused for Grafana — the region is asked for and resolved separately.
+    /// </remarks>
+    private async Task RunGrafanaImportMenuAsync(
+        SessionConfig config, string settingsFile, InteractiveSession session)
     {
-        var grafanaKey = Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
-        if (string.IsNullOrEmpty(grafanaKey))
+        // Precedence: the region remembered from this session's last Grafana import, then
+        // grafanaImport.region, then the session's Coralogix region. The remembered value goes first
+        // because it used to be absent entirely — the settings file was re-read on every entry, so a
+        // region picked here never survived even to the next visit.
+        var configuredRegion = LoadSettings(settingsFile).GrafanaImport.Region;
+        var defaultRegion = session.GrafanaImportRegion
+                            ?? RegionMapper.Normalize(configuredRegion)
+                            ?? config.Region;
+
+        var region = PromptInput.PromptRegion("Coralogix region for the target Grafana", defaultRegion);
+        if (region is null)
         {
-            grafanaKey = Prompt.Password("Grafana API key", validators: [Validators.Required()]);
-            if (string.IsNullOrEmpty(grafanaKey))
-            {
-                Console.Error.WriteLine("Grafana API key is required.");
-                return;
-            }
+            Console.Error.WriteLine("No region selected.");
+            return;
+        }
+
+        var grafanaEndpoint = RegionMapper.ResolveGrafana(region);
+
+        var dir = Prompt.Input<string>("Root directory", defaultValue: session.GrafanaImportRootDir ?? ".");
+        var recursive = Prompt.Confirm(
+            "Scan subdirectories?", defaultValue: session.GrafanaImportRecursive ?? true);
+        var dryRun = Prompt.Confirm(
+            "Dry run first (no writes)?", defaultValue: session.GrafanaImportDryRun ?? true);
+
+        session.GrafanaImportRegion = region;
+        session.GrafanaImportRootDir = dir;
+        session.GrafanaImportRecursive = recursive;
+        session.GrafanaImportDryRun = dryRun;
+
+        await RunGrafanaImportAsync(
+            dir, grafanaEndpoint, config.CxApiKey, interactive: true, settingsFile,
+            overwriteOverride: null, dryRun: dryRun, recursiveOverride: recursive);
+    }
+
+    /// <returns>
+    /// The config carrying the Grafana key just collected, and the settings file in force. Both flow back
+    /// into the menu loop: the key so a second visit does not re-ask for it, the settings file so the
+    /// answer given here applies to every later action instead of only this one.
+    /// </returns>
+    /// <remarks>
+    /// The Grafana key is held in <see cref="SessionConfig"/>, which is memory only. It is deliberately not
+    /// part of <see cref="InteractiveSession"/> — that gets written to disk, and a resumable file holding a
+    /// live Grafana credential is a different and worse thing than a remembered directory path.
+    /// </remarks>
+    private async Task<(SessionConfig Config, string SettingsFile)> RunMigrateMenuAsync(
+        SessionConfig config, string settingsFile, InteractiveSession session)
+    {
+        var grafanaKey = config.GrafanaApiKey;
+
+        if (!string.IsNullOrEmpty(grafanaKey))
+        {
+            Console.WriteLine("Using the Grafana API key from this session.");
         }
         else
         {
-            Console.WriteLine("Using GRAFANA_API_KEY from environment.");
+            grafanaKey = Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
+            if (string.IsNullOrEmpty(grafanaKey))
+            {
+                grafanaKey = Prompt.Password("Grafana API key", validators: [Validators.Required()]);
+                if (string.IsNullOrEmpty(grafanaKey))
+                {
+                    Console.Error.WriteLine("Grafana API key is required.");
+                    return (config, settingsFile);
+                }
+            }
+            else
+            {
+                Console.WriteLine("Using GRAFANA_API_KEY from environment.");
+            }
         }
 
-        settingsFile = Prompt.Input<string>("Settings file", defaultValue: settingsFile);
-        await ExecuteMigrationAsync(settingsFile, grafanaKey, config.CxApiKey, promptInteractive: true);
+        config = config with { GrafanaApiKey = grafanaKey };
+
+        settingsFile = Prompt.Input<string>("Settings file", defaultValue: session.SettingsFile ?? settingsFile);
+        session.SettingsFile = settingsFile;
+
+        // The session endpoint, not the settings region: the operator picked a region at startup and this
+        // used to discard it, migrating to whatever the file happened to name.
+        await ExecuteMigrationAsync(
+            settingsFile, grafanaKey, config.CxApiKey, promptInteractive: true,
+            cxEndpointOverride: config.CxEndpoint);
+
+        return (config, settingsFile);
     }
 
     private async Task RunBackupMenuAsync(string settingsFile)
@@ -1078,9 +1238,17 @@ public sealed class CommandHandlers
             Console.WriteLine("  (No dashboards in selected folder or nested folders)");
         }
 
-        var defaultBackupPath = $"cx-folder-delete-backup-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.zip";
+        // Only the directory is remembered, never the whole path: the filename carries a timestamp, and
+        // offering back a name that already exists would make the overwrite confirmation below fire on
+        // every single run.
+        var defaultBackupName = $"cx-folder-delete-backup-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.zip";
+        var defaultBackupPath = string.IsNullOrWhiteSpace(session.CleanupBackupDirectory)
+            ? defaultBackupName
+            : Path.Combine(session.CleanupBackupDirectory, defaultBackupName);
+
         var backupPath = Prompt.Input<string>("Backup ZIP path", defaultValue: defaultBackupPath);
         backupPath = Path.GetFullPath(backupPath);
+        session.CleanupBackupDirectory = Path.GetDirectoryName(backupPath);
 
         if (File.Exists(backupPath))
         {
@@ -1122,7 +1290,6 @@ public sealed class CommandHandlers
 
     private sealed record FolderSelectItem(CxFolderItem Folder, string Display);
 
-    private sealed record ImportFolderOption(string Dir, int Count, string Display);
 
     private static List<FolderSelectItem> BuildFlatFolderList(List<CxFolderItem> folders)
     {
@@ -1360,7 +1527,12 @@ public sealed class CommandHandlers
 
     // ── Import ────────────────────────────────────────────────────────────────
 
-    public async Task<int> RunImportAsync(string? input, string endpoint, string apiKey, bool interactive)
+    public async Task<int> RunImportAsync(
+        string? input,
+        string endpoint,
+        string apiKey,
+        bool interactive,
+        string? settingsFile = null)
     {
         string rootDir;
 
@@ -1386,192 +1558,333 @@ public sealed class CommandHandlers
             return 1;
         }
 
-        var converter = CreateConverter();
+        var settings = LoadSettings(settingsFile);
+        var importSettings = settings.Import;
+
+        try
+        {
+            ImportOrchestrator.GuardCheckpointPath(importSettings.CheckpointFile, settings.Migration.CheckpointFile);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+
+        var files = ImportFlow.Discover(rootDir, importSettings.Grouping.Recursive);
+        if (files.Count == 0)
+        {
+            Console.Error.WriteLine($"No JSON files found in '{rootDir}'.");
+            return 1;
+        }
 
         using var foldersClient = new CoralogixFoldersClient(
             _loggerFactory.CreateLogger<CoralogixFoldersClient>(), endpoint, apiKey);
         using var dashboardsClient = new CoralogixDashboardsClient(
             _loggerFactory.CreateLogger<CoralogixDashboardsClient>(), endpoint, apiKey);
 
-        List<(string LocalDir, string? CxFolderId)> importPlan;
+        var flow = new ImportFlow(new CoralogixFolderTarget(foldersClient));
+
+        ImportPlan? plan;
+        var overwrite = importSettings.OverwriteExisting;
 
         if (interactive)
         {
-            var plan = await RunInteractiveImportSelectionAsync(rootDir, foldersClient);
-            if (plan is null) return 1;
-            importPlan = plan;
+            var selection = await flow.BuildPlanInteractiveAsync(rootDir, files, importSettings);
+            if (selection is null) return 1;
+            plan = selection.Plan;
+            overwrite = selection.OverwriteExisting;
         }
         else
         {
-            importPlan = [(rootDir, null)];
+            plan = await flow.BuildPlanAsync(rootDir, files, importSettings.Grouping);
+            if (plan is null) return 1;
         }
 
-        var totalPushed = 0;
-        var totalFailed = 0;
-
-        foreach (var (localDir, cxFolderId) in importPlan)
+        var effectiveSettings = new ImportSettings
         {
-            var jsonFiles = Directory.GetFiles(localDir, "*.json", SearchOption.TopDirectoryOnly);
-            if (jsonFiles.Length == 0) continue;
+            CheckpointFile = importSettings.CheckpointFile,
+            ReportFile = importSettings.ReportFile,
+            MaxRetries = importSettings.MaxRetries,
+            InitialRetryDelaySeconds = importSettings.InitialRetryDelaySeconds,
+            OverwriteExisting = overwrite,
+            IsLocked = importSettings.IsLocked,
+            Grouping = importSettings.Grouping
+        };
 
+        if (interactive)
+            await PromptImportCheckpointResetAsync(effectiveSettings);
+
+        var checkpoint = new CheckpointStore(effectiveSettings.CheckpointFile);
+        var report = new MigrationReport();
+
+        var orchestrator = new ImportOrchestrator(
+            new CoralogixTransformer(
+                CreateConverter(new MultiLuceneMergeOptions(settings.Migration.MultiLuceneMerge.AllowlistedWidgetTypes)),
+                new DashboardValidator()),
+            new CoralogixDashboardPublisher(
+                dashboardsClient, _loggerFactory.CreateLogger<CoralogixDashboardPublisher>()),
+            checkpoint,
+            report,
+            effectiveSettings,
+            _loggerFactory.CreateLogger<ImportOrchestrator>());
+
+        Console.WriteLine();
+        Console.WriteLine($"Importing {plan.Items.Count} dashboard(s)...");
+
+        var summary = await orchestrator.RunAsync(plan, settings.Migration.CheckpointFile);
+
+        Console.WriteLine();
+        Console.WriteLine("Import complete.");
+        Console.WriteLine($"  Completed : {summary.Completed}");
+        Console.WriteLine($"  Skipped   : {summary.Skipped}");
+        Console.WriteLine($"  Failed    : {summary.Failed}");
+        Console.WriteLine();
+        Console.WriteLine($"See {effectiveSettings.ReportFile} for details.");
+
+        return summary.Failed > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Publishes a directory of Grafana dashboard exports into a Coralogix-hosted Grafana.
+    /// </summary>
+    /// <param name="overwriteOverride">Null when the flag was omitted, so the settings file still decides.</param>
+    /// <param name="dryRun">Prints the plan and the datasource remap without creating or writing anything.</param>
+    public async Task<int> RunGrafanaImportAsync(
+        string? input,
+        string grafanaEndpoint,
+        string apiKey,
+        bool interactive,
+        string? settingsFile = null,
+        bool? overwriteOverride = null,
+        bool dryRun = false,
+        bool? recursiveOverride = null)
+    {
+        string rootDir;
+
+        if (string.IsNullOrEmpty(input))
+        {
+            if (!interactive)
+            {
+                Console.Error.WriteLine("Error: input directory is required when not using interactive mode.");
+                return 1;
+            }
+            rootDir = Prompt.Input<string>("Root directory containing Grafana dashboards", defaultValue: ".");
+        }
+        else
+        {
+            rootDir = input;
+        }
+
+        rootDir = Path.GetFullPath(rootDir);
+
+        if (!Directory.Exists(rootDir))
+        {
+            Console.Error.WriteLine($"Error: directory '{rootDir}' not found.");
+            return 1;
+        }
+
+        var settings = LoadSettings(settingsFile);
+        var grafanaSettings = settings.GrafanaImport;
+
+        try
+        {
+            ImportOrchestrator.GuardCheckpointPaths(
+                settings.Migration.CheckpointFile,
+                settings.Import.CheckpointFile,
+                grafanaSettings.CheckpointFile);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+
+        var recursive = recursiveOverride ?? grafanaSettings.Grouping.Recursive;
+        var files = ImportFlow.Discover(rootDir, recursive);
+        if (files.Count == 0)
+        {
+            Console.Error.WriteLine(
+                $"No JSON files found in '{rootDir}'{(recursive ? "" : " (top level only — try --recursive)")}.");
+            return 1;
+        }
+
+        using var grafana = new GrafanaApiClient(
+            _loggerFactory.CreateLogger<GrafanaApiClient>(),
+            grafanaEndpoint,
+            apiKey,
+            new GrafanaPublishOptions { Message = grafanaSettings.Message });
+
+        Console.WriteLine();
+        Console.WriteLine($"Target Grafana: {grafanaEndpoint}");
+
+        var datasources = await grafana.ListDatasourcesAsync();
+        if (datasources.All.Count == 0)
+        {
+            Console.Error.WriteLine(
+                "Error: the target returned no datasources. Check the endpoint and API key before importing — " +
+                "every panel would be left pointing at a datasource that does not exist here.");
+            return 1;
+        }
+
+        PrintDatasources(datasources);
+
+        // A dry run must not create folders, and plan construction is what creates them — so the
+        // non-writing decorator has to be in place before the plan is built, not checked after.
+        IDashboardFolderTarget folderTarget = dryRun ? new DryRunFolderTarget(grafana) : grafana;
+
+        var grouping = new FolderGroupingSettings
+        {
+            Separator = grafanaSettings.Grouping.Separator,
+            SegmentCount = grafanaSettings.Grouping.SegmentCount,
+            SegmentStart = grafanaSettings.Grouping.SegmentStart,
+            Recursive = recursive,
+            UngroupedFolderName = grafanaSettings.Grouping.UngroupedFolderName
+        };
+
+        var flow = new ImportFlow(folderTarget);
+        var overwrite = overwriteOverride ?? grafanaSettings.OverwriteExisting;
+
+        ImportPlan? plan;
+        if (interactive)
+        {
+            var selection = await flow.BuildPlanInteractiveAsync(
+                rootDir, files, grafanaSettings.ToImportSettings(grouping, overwrite));
+            if (selection is null) return 1;
+            plan = selection.Plan;
+            overwrite = overwriteOverride ?? selection.OverwriteExisting;
+        }
+        else
+        {
+            plan = await flow.BuildPlanAsync(rootDir, files, grouping, ImportFlow.ChooseStrategy(files));
+            if (plan is null) return 1;
+        }
+
+        if (dryRun)
+        {
+            PrintDryRunPlan(plan, rootDir);
             Console.WriteLine();
-            Console.WriteLine($"Importing from '{Path.GetRelativePath(rootDir, localDir)}' ({jsonFiles.Length} file(s))...");
-
-            foreach (var file in jsonFiles)
-            {
-                try
-                {
-                    var json = await File.ReadAllTextAsync(file);
-                    var options = new ConversionOptions { FolderId = cxFolderId };
-                    var dashboard = converter.ConvertToJObject(json, options);
-                    var dashboardName = dashboard.Value<string>("name") ?? Path.GetFileNameWithoutExtension(file);
-
-                    var catalog = await dashboardsClient.GetCatalogItemsAsync();
-                    var conflict = catalog.FirstOrDefault(item =>
-                        string.Equals(item.Name, dashboardName, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(item.FolderId, cxFolderId, StringComparison.OrdinalIgnoreCase));
-
-                    string? dashboardId;
-                    if (conflict != null)
-                    {
-                        dashboard["id"] = conflict.Id;
-                        Console.Write($"  [overwrite] {dashboardName} ... ");
-                        var replaced = await dashboardsClient.ReplaceDashboardAsync(dashboard, folderId: cxFolderId);
-                        dashboardId = replaced ? conflict.Id : null;
-                    }
-                    else
-                    {
-                        Console.Write($"  [create]    {dashboardName} ... ");
-                        dashboardId = await dashboardsClient.CreateDashboardAsync(dashboard, folderId: cxFolderId);
-                    }
-
-                    if (dashboardId == null)
-                    {
-                        Console.WriteLine("FAILED");
-                        totalFailed++;
-                        continue;
-                    }
-
-                    if (cxFolderId != null)
-                        await dashboardsClient.AssignDashboardToFolderAsync(dashboardId, cxFolderId);
-
-                    Console.WriteLine($"OK (id: {dashboardId})");
-                    totalPushed++;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"ERROR: {ex.Message}");
-                    totalFailed++;
-                }
-            }
+            Console.WriteLine("Dry run — no folders created, no dashboards written, no checkpoint updated.");
+            return 0;
         }
 
+        var effectiveSettings = grafanaSettings.ToImportSettings(grouping, overwrite);
+
+        if (interactive)
+            await PromptImportCheckpointResetAsync(effectiveSettings);
+
+        var checkpoint = new CheckpointStore(effectiveSettings.CheckpointFile);
+        var report = new MigrationReport();
+
+        var orchestrator = new ImportOrchestrator(
+            new GrafanaTransformer(
+                new GrafanaDashboardTransform(),
+                datasources,
+                grafanaSettings.DatasourceUidMap,
+                grafanaSettings.AllowTargetDefaultFallback),
+            grafana,
+            checkpoint,
+            report,
+            effectiveSettings,
+            _loggerFactory.CreateLogger<ImportOrchestrator>());
+
         Console.WriteLine();
-        Console.WriteLine($"Import complete. Pushed: {totalPushed}, Failed: {totalFailed}");
-        return totalFailed > 0 ? 1 : 0;
+        Console.WriteLine($"Publishing {plan.Items.Count} dashboard(s) to Grafana...");
+
+        var summary = await orchestrator.RunAsync(plan, settings.Migration.CheckpointFile);
+
+        Console.WriteLine();
+        Console.WriteLine("Grafana import complete.");
+        Console.WriteLine($"  Completed : {summary.Completed}");
+        Console.WriteLine($"  Skipped   : {summary.Skipped}");
+        Console.WriteLine($"  Failed    : {summary.Failed}");
+        Console.WriteLine();
+        Console.WriteLine($"See {effectiveSettings.ReportFile} for details.");
+
+        return summary.Failed > 0 ? 1 : 0;
     }
 
-    private async Task<List<(string LocalDir, string? CxFolderId)>?> RunInteractiveImportSelectionAsync(
-        string rootDir,
-        CoralogixFoldersClient foldersClient)
+    private static void PrintDatasources(DatasourceIndex datasources)
     {
-        var dashboardFolders = DiscoverDashboardFolders(rootDir);
-
-        if (dashboardFolders.Count == 0)
+        Console.WriteLine($"Datasources on the target ({datasources.All.Count}):");
+        foreach (var datasource in datasources.All.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
         {
-            Console.Error.WriteLine($"No JSON files found in '{rootDir}' or its immediate subdirectories.");
-            return null;
+            var marker = datasource.IsDefault ? "  (default)" : string.Empty;
+            Console.WriteLine($"  {datasource.Name}  [{datasource.Type}]  {datasource.Uid}{marker}");
         }
-
-        var folderOptions = dashboardFolders
-            .Select(f => new ImportFolderOption(f.Dir, f.Count, f.Dir == rootDir ? $"(root) [{f.Count} dashboard(s)]" : $"{Path.GetRelativePath(rootDir, f.Dir)} [{f.Count} dashboard(s)]"))
-            .ToList();
-        var selected = Prompt.MultiSelect("Select folders to import", folderOptions, textSelector: x => x.Display);
-
-        var selectedFolders = selected.Select(x => (x.Dir, x.Count)).ToList();
-
-        if (selectedFolders.Count == 0)
-        {
-            Console.Error.WriteLine("No folders selected.");
-            return null;
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("Fetching Coralogix folders...");
-        var cxFolders = await foldersClient.ListFoldersAsync();
-
-        var plan = new List<(string LocalDir, string? CxFolderId)>();
-
-        foreach (var (dir, count) in selectedFolders)
-        {
-            var label = dir == rootDir ? "(root)" : Path.GetRelativePath(rootDir, dir);
-            var mapChoices = new[] { "+ Create new folder" }
-                .Concat(cxFolders.Select(f => f.Name))
-                .Concat(["(none — no folder)"])
-                .ToList();
-            var mapChoice = Prompt.Select($"Map '{label}' ({count} dashboard(s)) → Coralogix folder", mapChoices);
-
-            string? cxFolderId = null;
-
-            if (mapChoice != "(none — no folder)" && mapChoice != "+ Create new folder")
-            {
-                cxFolderId = cxFolders.First(f => f.Name == mapChoice).Id;
-            }
-            else if (mapChoice == "+ Create new folder")
-            {
-                var defaultFolderName = dir == rootDir ? "Imported Dashboards" : Path.GetFileName(dir);
-                var folderName = Prompt.Input<string>("New folder name", defaultValue: defaultFolderName);
-
-                Console.Write($"  Creating folder '{folderName}'... ");
-                cxFolderId = await foldersClient.GetOrCreateFolderAsync(folderName);
-                if (cxFolderId == null)
-                {
-                    Console.Error.WriteLine($"Failed to create folder '{folderName}'.");
-                    return null;
-                }
-                Console.WriteLine($"OK (id: {cxFolderId})");
-                cxFolders = await foldersClient.ListFoldersAsync();
-            }
-
-            plan.Add((dir, cxFolderId));
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("Import plan:");
-        foreach (var (localDir, cxFolderId) in plan)
-        {
-            var localLabel = localDir == rootDir ? "(root)" : Path.GetRelativePath(rootDir, localDir);
-            var cxLabel = cxFolderId == null
-                ? "(no folder)"
-                : (await foldersClient.ListFoldersAsync()).FirstOrDefault(f => f.Id == cxFolderId)?.Name ?? cxFolderId;
-            Console.WriteLine($"  {localLabel}  →  {cxLabel}");
-        }
-
-        var proceed = Prompt.Confirm("Proceed with import?", defaultValue: true);
-        if (!proceed)
-        {
-            Console.WriteLine("Aborted.");
-            return null;
-        }
-
-        return plan;
     }
 
-    private static List<(string Dir, int Count)> DiscoverDashboardFolders(string rootDir)
+    private static void PrintDryRunPlan(ImportPlan plan, string rootDir)
     {
-        var result = new List<(string Dir, int Count)>();
+        Console.WriteLine();
+        Console.WriteLine($"Would publish {plan.Items.Count} dashboard(s) from '{rootDir}':");
+        Console.WriteLine();
 
-        var rootJsonCount = Directory.GetFiles(rootDir, "*.json", SearchOption.TopDirectoryOnly).Length;
-        if (rootJsonCount > 0)
-            result.Add((rootDir, rootJsonCount));
-
-        foreach (var subDir in Directory.GetDirectories(rootDir).OrderBy(d => d))
+        foreach (var group in plan.Items.GroupBy(i => i.FolderDisplayName).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
-            var count = Directory.GetFiles(subDir, "*.json", SearchOption.TopDirectoryOnly).Length;
-            if (count > 0)
-                result.Add((subDir, count));
+            var folderId = group.First().CxFolderId;
+            var note = DryRunFolderTarget.IsPending(folderId)
+                ? "  (folder would be created)"
+                : folderId is null ? "  (General)" : $"  (uid: {folderId})";
+
+            Console.WriteLine($"  {group.Key}{note}");
+            foreach (var item in group.OrderBy(i => i.RelativePath, StringComparer.Ordinal))
+                Console.WriteLine($"    {item.EffectiveName}   ← {item.RelativePath}");
+        }
+    }
+
+    private static MigrationSettings LoadSettings(string? settingsFile)
+    {
+        var path = string.IsNullOrWhiteSpace(settingsFile) ? "migration-settings.json" : settingsFile;
+
+        if (!File.Exists(path))
+            return new MigrationSettings();
+
+        try
+        {
+            return new ConfigurationBuilder()
+                .AddJsonFile(Path.GetFullPath(path), optional: false)
+                .Build()
+                .Get<MigrationSettings>() ?? new MigrationSettings();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: could not read '{path}' ({ex.Message}). Using defaults.");
+            return new MigrationSettings();
+        }
+    }
+
+    private static async Task PromptImportCheckpointResetAsync(ImportSettings settings)
+    {
+        if (!File.Exists(settings.CheckpointFile)) return;
+
+        var existing = new CheckpointStore(settings.CheckpointFile);
+        await existing.LoadAsync();
+        var completed = existing.All.Count(e => e.Status == CheckpointStatus.Completed);
+        if (completed == 0) return;
+
+        Console.WriteLine();
+        Console.WriteLine($"Checkpoint '{settings.CheckpointFile}' already has {completed} completed dashboard(s).");
+
+        if (settings.OverwriteExisting)
+        {
+            Console.WriteLine("Overwrite mode is ON — completed dashboards will be re-processed and replaced in Coralogix.");
+            Console.WriteLine();
+            return;
         }
 
-        return result;
+        Console.WriteLine("Keeping it means those dashboards will be SKIPPED (not re-imported).");
+        if (Prompt.Confirm("Reset checkpoint and re-import all dashboards?", defaultValue: false))
+        {
+            File.Delete(settings.CheckpointFile);
+            Console.WriteLine("Checkpoint reset — all dashboards will be imported fresh.");
+        }
+        else
+        {
+            Console.WriteLine("Keeping checkpoint — only new or failed dashboards will be imported.");
+        }
+
+        Console.WriteLine();
     }
+
 }

@@ -10,6 +10,8 @@ It supports:
 - Download-only backup of live Grafana dashboards (`backup`)
 - Bulk import from local files (`import`)
 - Conversion + round-trip validation (`verify`)
+- Grafana-to-Grafana publishing (`grafana-import`) — push exported dashboards into a Coralogix-hosted
+  Grafana unchanged apart from datasource re-pointing, with a dry run and idempotent re-runs
 
 ---
 
@@ -24,6 +26,7 @@ It supports:
   - [Step 5 — Run interactive migration](#step-5--run-interactive-migration)
   - [Step 6 — Follow the guided prompts](#step-6--follow-the-guided-prompts)
   - [Step 7 — Monitor progress and resume](#step-7--monitor-progress-and-resume)
+- [Resuming a session](#resuming-a-session)
 - [How It Works](#how-it-works)
 - [Supported Panel Types](#supported-panel-types)
 - [Supported Query Languages](#supported-query-languages)
@@ -123,11 +126,34 @@ The session walks you through a sequence of prompts. Here is exactly what to exp
 **a) Coralogix session setup**
 
 ```
-Coralogix region [eu1/eu2/us1/us2/ap1/ap2/ap3/in1]:
+Coralogix region
+> eu1
+  eu2
+  us1
+  us2
+  ap1
+  ap2
+  ap3
+  in1
+
 Coralogix API key:
 ```
 
-Enter your Coralogix region and API key. If `CX_API_KEY` is already exported, the key prompt is skipped.
+Pick a region with the arrow keys — the list is the set the tool can actually resolve, so a typo can no
+longer end the session. The pre-selected entry comes from the region you last used in this session if there
+is one (see [Resuming a session](#resuming-a-session)), otherwise `coralogix.region` in the settings file,
+falling back to `eu2` when that is missing or unrecognised. If `CX_API_KEY` is already exported, the key
+prompt is skipped.
+
+The same picker is used by **Settings → Change Coralogix region / endpoint** (pre-selected with the region
+the session is currently on) and by **Grafana Import**, which asks separately because the session endpoint
+is the REST API base rather than a Grafana URL. That one is pre-selected from the region last used for a
+Grafana import, then `grafanaImport.region`, then the session's region.
+
+It also appears on the `--interactive` flag paths — `import -I`, `verify -d … -I` and `grafana-import -I` —
+each pre-selected from the settings region for that command. Passing `--endpoint` or `--region` skips the
+picker: you have already named the target, and there is no way to reverse a URL back into a region to
+pre-select. A region named on the command line is never silently corrected — `--region eu9` fails.
 
 **b) Main menu**
 
@@ -146,7 +172,8 @@ Enter your Coralogix region and API key. If `CX_API_KEY` is already exported, th
   0. Exit
 ```
 
-Use arrow keys to highlight **Migrate** and press Enter.
+Use arrow keys to highlight **Migrate** and press Enter. Migrate publishes to the region you picked at
+startup, not to whatever `coralogix.region` says.
 
 Option **7 (Backup)** downloads dashboards from Grafana without converting or uploading anything —
 see [`backup`](#backup). Note that the interactive session asks for a Coralogix region and key up
@@ -258,6 +285,60 @@ A human-readable summary is written to `migration-report.txt` after every run.
 
 ---
 
+## Resuming a session
+
+The interactive console remembers the answers you gave it, so a second run offers them back instead of
+asking from scratch. Each console run has a short session id, printed in the banner at startup and again on
+exit:
+
+```
+╔══════════════════════════════════════════╗
+║  Grafana → Coralogix Dashboard Converter ║
+╚══════════════════════════════════════════╝
+  Session 4f9c1a02
+
+...
+
+Session saved as 4f9c1a02.
+  Resume it with:  grafana-to-cx --resume 4f9c1a02
+  Or the most recent with:  grafana-to-cx --continue
+```
+
+| Flag | Effect |
+|---|---|
+| `--resume <id>` | Resume that session. Any unambiguous prefix of the id works, like a git short hash |
+| `--resume` | List stored sessions newest-first and pick one |
+| `-c`, `--continue` | Resume the most recently used session |
+
+An id that matches nothing, or matches more than one session, is an error naming the candidates — it never
+quietly starts a fresh session, because the hardcoded defaults would then look like remembered ones and the
+first thing you accepted by pressing Enter could be a root directory or a dry-run flag you never chose.
+
+Remembered answers appear as prompt **defaults**, so every prompt is still shown and one Enter per prompt
+re-runs a command identically. Nothing is silently reused. The console remembers the Coralogix region, the
+settings file, and the per-command answers of the top-level menus — Grafana Import's region, root directory,
+recursive and dry-run; Import's root directory; Convert's input and output; Push's input file; and the
+directory (not the filename, which is timestamped) of Cleanup's backup zip. The folder-grouping and
+folder-mapping prompts inside an import are not remembered: they describe one specific directory tree and
+would go stale against a different one.
+
+Sessions are stored one file per session under `~/.grafana-to-cx/sessions/`, written after every completed
+action rather than only at exit, so an interrupted run does not lose what you already answered. The 20 most
+recent are kept and older ones are pruned. Deleting the directory is safe — it only discards remembered
+answers.
+
+**Session files hold no credentials.** The Coralogix and Grafana API keys live in memory for the life of the
+process and are never written to disk, so resuming always re-asks for the key (or reads `CX_API_KEY` /
+`GRAFANA_API_KEY` from the environment). Within a single process the Grafana key is asked once, not once per
+visit to the Migrate menu.
+
+A corrupt or unreadable session file is warned about and skipped rather than fatal: being unable to recall
+your last root directory is never a reason the console cannot start. This is deliberately unlike
+`migration-checkpoint.json`, where a bad file means the record of what was already published is
+untrustworthy and continuing would republish or skip real dashboards.
+
+---
+
 ## How It Works
 
 ```text
@@ -287,6 +368,15 @@ Coralogix Custom Dashboard JSON
         ├─ save locally (convert)
         ├─ upload via API (push / migrate / import)
         └─ upload + verify round-trip (verify)
+```
+
+`migrate` and `import` share the same resilience machinery — checkpoint/resume, retry with exponential
+backoff, and a written report — differing only in where dashboards come from:
+
+```text
+migrate:  Grafana API  ──┐
+                         ├──▶  convert ──▶ validate ──▶ publish to Coralogix
+import:   local folder ──┘                              (checkpoint after every dashboard)
 ```
 
 The core conversion logic is in `src/GrafanaToCx.Core`, while `src/GrafanaToCx.Cli` provides CLI commands, API interaction, interactive prompts, and migration orchestration.
@@ -438,6 +528,15 @@ CX_API_KEY=cxtp_xxx CX_REGION=EU1 cx dashboards check --from-file ./converted/da
 | `ap1`, `ap2`, `ap3` | Asia Pacific |
 | `in1` | India |
 
+Every command resolves its target through the same chain: `--endpoint`, `--region`, an explicit endpoint in
+the settings file, the interactive picker, then the settings region. Nothing is guessed — a command with no
+target fails, and each run prints the endpoint it resolved along with which of those named it.
+
+> **Upgrade note.** `import` and `verify` no longer default to eu1. If you relied on that, pass
+> `--region eu1` or set `coralogix.region` in the settings file you pass with `-s`. The old default was
+> invisible: `import` creates folders and overwrites same-named dashboards, so a run against the wrong
+> tenant was undone by hand.
+
 ---
 
 ## Environment Variables
@@ -460,6 +559,14 @@ All commands run from repository root:
 ```bash
 dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- <command> [options]
 ```
+
+With no command, the interactive console starts. It takes no verb, only these flags:
+
+| Option | Description |
+|---|---|
+| `--resume <id>` | Resume a stored session by id, or any unambiguous prefix of it |
+| `--resume` | Pick from the list of stored sessions, newest first |
+| `-c`, `--continue` | Resume the most recently used session |
 
 ### `convert`
 
@@ -485,7 +592,11 @@ dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- migrate --s
 | Flag | Description |
 |---|---|
 | `-s`, `--settings` | Path to migration settings JSON (default: `migration-settings.json`) |
+| `-r`, `--region` | Coralogix destination region; overrides `coralogix.region` |
 | `-I`, `--interactive` | Enable guided prompts for folder mapping and conflict handling |
+
+`--region` overrides only the Coralogix destination. The source Grafana comes from `grafana.region`, which
+is a different system — the destination region says nothing about where to read from.
 
 API key precedence for non-interactive `migrate`:
 1. `GRAFANA_API_KEY` / `CX_API_KEY` environment variables
@@ -538,21 +649,334 @@ Available via **interactive mode** (menu option 2). Configure Coralogix region a
 
 ### `import`
 
-Available via **interactive mode** (menu option 3). Upload many local Grafana dashboard JSON files from a directory with prompts for folder mapping.
+Bulk-import a directory of exported Grafana dashboard JSON files, deriving Coralogix folders from the
+filenames. Supports checkpoint/resume, retry with backoff, and a written report — the same machinery
+`migrate` uses, but sourced from local files instead of the Grafana API.
+
+**Interactive (recommended)** — menu option 3, or:
+
+```bash
+export CX_API_KEY=cxtp_xxxxxxxxxxxx
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- import ./exports --interactive
+```
+
+The flow enumerates the directory, groups files into folders, and shows a preview. **Nothing is uploaded
+until you accept it**, so changing the separator or segment count is instant and free:
+
+```text
+Found 23 dashboard JSON file(s) in 'artifacts/dashboards'.
+Grouping: split filename on " - ", first 2 segment(s) become the folder name.
+Dashboard names from: JSON title
+
+  DDE - Delivery Data Engineering    3 dashboard(s)
+  DDM - Delivery Data Modelling      1 dashboard(s)
+  YM - Yield Management                 3 dashboard(s)
+  WSP - WebShop VSM                    4 dashboard(s)
+  WSP - webShop Identity               1 dashboard(s)
+  WSP - webShop Login & Registration   7 dashboard(s)
+  WSP - webShop Platforms              2 dashboard(s)
+  WIWO - Wire In Wire Out            2 dashboard(s)
+------------------------------------------------------
+  8 folder(s), 23 dashboard(s), 0 ungrouped
+
+> Accept this grouping
+  Change separator (currently " - ")
+  Change segment count (currently 2)
+  Pick which segment starts the folder name (currently #1)
+  Show files per folder
+  Rename a folder
+  Group by subdirectories
+  Put everything in one folder
+  Dashboard names: currently "JSON title"
+  Cancel
+```
+
+*Pick which segment starts the folder name* is for filenames where the folder-worthy part is not at the
+front. It shows a real filename split into numbered segments and you choose one:
+
+```text
+Sample filename: DDE - Delivery Data Engineering - Primary CRM
+
+> 1: DDE
+  2: Delivery Data Engineering
+  3: Primary CRM
+```
+
+Picking `2` with a segment count of `1` gives the folder `Delivery Data Engineering`. Skipped leading
+segments are not discarded — they stay in the dashboard name (`DDE - Primary CRM`), so nothing from the
+filename is lost. The default of `#1` is the previous behaviour: the leading segments become the folder.
+
+After accepting the grouping you choose where the folders go:
+
+```text
+? Folder placement strategy
+> Put dashboards into matching Coralogix folders that already exist
+  Nest all under a parent Coralogix folder (preserves structure)
+  Create each folder at the top level
+```
+
+- **Put dashboards into matching folders that already exist** — matches each derived group against the
+  folders already in the destination, so an import does not create `DDE - Delivery Data Engineering`
+  next to an existing `Delivery Data Engineering`. Matching is tried in order: exact name, then equal
+  ignoring punctuation and spacing (`Wire In / Wire Out` ↔ `wire-in-wire-out`), then one name
+  contained in the other. Folder names shorter than 4 characters after normalising are never matched by
+  containment, so a folder called `ES` cannot swallow every group.
+- **Nest all under a parent** — creates or reuses a single root folder and puts each group beneath it.
+  Hidden on targets without nested folders.
+- **Create each folder at the top level** — creates one top-level folder per group, reusing only a folder
+  whose name matches exactly.
+
+The matching strategy shows its proposal before writing anything, and every row is overridable:
+
+```text
+Folder mapping:
+  DDE - Delivery Data Engineering  →  Engineering / Delivery Data Engineering   (matched on a contained name — check this one)
+  YM - Yield Management               →  Yield Management   (exact name match)
+  WSP - webShop Platforms            →  + create new folder with this name
+
+> Accept this mapping
+  Change one mapping
+  Cancel
+```
+
+*Change one mapping* re-points a single group at any existing folder (listed by full path, so folders
+sharing a leaf name stay distinguishable), at a new folder, or at no folder at all. Only the groups still
+marked `+ create new folder` cause a folder to be created.
+
+Then you choose whether to overwrite existing dashboards, and — if a previous run left a checkpoint —
+whether to resume or start fresh.
+
+**Dashboard names come from each file's JSON `title`, not the filename.** These often differ (a file named
+`WSP - webShop Platforms - Primary.json` may contain the title `Lobby Platforms Dashboard V2`). Use *Show
+files per folder* to see both, and *Dashboard names* to switch to the filename remainder instead.
+
+**Non-interactive:**
+
+```bash
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- import ./exports --region eu1
+```
+
+Uses the grouping defaults from the settings file, creates folders at the top level, and overwrites
+existing dashboards.
+
+| Argument/Flag | Description |
+|---|---|
+| `<input>` | Directory containing Grafana dashboard JSON files |
+| `-e`, `--endpoint` | Coralogix API endpoint |
+| `-r`, `--region` | Coralogix region; resolves to `https://<region-host>/mgmt/openapi/latest` |
+| `-s`, `--settings` | Path to settings JSON (default: `migration-settings.json`) |
+| `-I`, `--interactive` | Enable the region picker plus the guided grouping and folder-mapping prompts |
+
+Target precedence: `--endpoint`, `--region`, the interactive picker, `coralogix.region`. There is no
+built-in default — the command fails rather than guess a region. Note that the default settings path is
+relative, so running from the repository root finds no settings file and you must pass `-r` or
+`-s src/GrafanaToCx.Cli/migration-settings.json`. Every run prints the resolved target and where it came
+from.
+
+API key precedence: `CX_API_KEY` environment variable, then `credentials.cxApiKey` in the settings file.
+
+Progress is written to `import-checkpoint.json` after every dashboard, so an interrupted run resumes where
+it stopped. A summary — including per-dashboard panel conversion warnings — is written to
+`import-report.txt`. These are deliberately separate from the migrate checkpoint and report; the tool
+refuses to start if they are configured to the same path.
+
+#### Import settings
+
+```json
+{
+  "import": {
+    "checkpointFile": "import-checkpoint.json",
+    "reportFile": "import-report.txt",
+    "maxRetries": 5,
+    "initialRetryDelaySeconds": 2,
+    "overwriteExisting": true,
+    "isLocked": false,
+    "grouping": {
+      "separator": " - ",
+      "segmentCount": 2,
+      "segmentStart": 1,
+      "recursive": false,
+      "ungroupedFolderName": null
+    }
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `import.checkpointFile` | Checkpoint path for resume. Must differ from `migration.checkpointFile` |
+| `import.reportFile` | Human-readable import report path |
+| `import.overwriteExisting` | Replace dashboards matching on name + folder. Defaults to `true` |
+| `import.isLocked` | Lock imported dashboards |
+| `import.grouping.separator` | Filename separator used to derive folder names |
+| `import.grouping.segmentCount` | How many consecutive segments form the folder name |
+| `import.grouping.segmentStart` | 1-based index of the first segment used. `1` = leading segments |
+| `import.grouping.recursive` | Scan subdirectories as well as the top level |
+| `import.grouping.ungroupedFolderName` | Folder for files yielding no prefix. `null` = no folder |
+| `grafanaImport.*` | Settings for the Grafana-to-Grafana flow — see [`grafana-import`](#grafana-import) |
+
+Files whose names have too few segments are left **ungrouped** rather than being forced into a folder named
+after a single dashboard.
+
+### `grafana-import`
+
+Publish a directory of exported Grafana dashboards into a **Coralogix-hosted Grafana**
+(`https://<region-host>/grafana`) rather than converting them to Coralogix custom dashboards. Reuses the
+same discovery, folder-grouping, checkpoint/resume, retry and report machinery as `import`; what differs is
+the destination and a JSON transform that re-points datasources instead of rewriting panels.
+
+Accepts both raw UI exports and the `{ "dashboard": …, "meta": … }` envelope returned by
+`GET /api/dashboards/uid/:uid` — which is also what this tool's own `grafana-backup.zip` contains.
+
+**Always dry-run first.** Nothing is created: no folders, no dashboards, no checkpoint.
+
+```bash
+export CX_API_KEY=cxtp_xxxxxxxxxxxx
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- \
+  grafana-import ./grafana-backup -s src/GrafanaToCx.Cli/migration-settings.json \
+  --region eu1 --recursive --dry-run
+```
+
+Then run it for real, or use `-I` for the guided grouping and folder prompts (also available as option 7
+in the interactive menu):
+
+```bash
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- \
+  grafana-import ./grafana-backup -s src/GrafanaToCx.Cli/migration-settings.json \
+  --region eu1 --recursive
+```
+
+| Argument/Flag | Description |
+|---|---|
+| `<input>` | Directory containing Grafana dashboard JSON files |
+| `-e`, `--endpoint` | Grafana API base URL, e.g. `https://api.coralogix.com/grafana` |
+| `-r`, `--region` | Coralogix region; resolves to `https://<region-host>/grafana` |
+| `-s`, `--settings` | Path to settings JSON (default: `migration-settings.json`) |
+| `-I`, `--interactive` | Guided grouping and folder-mapping prompts |
+| `-n`, `--dry-run` | Print the plan and the datasource inventory; write nothing |
+| `--overwrite` / `--no-overwrite` | Override `grafanaImport.overwriteExisting` |
+| `-R`, `--recursive` / `--no-recursive` | Override `grafanaImport.grouping.recursive` |
+
+`g2g` is accepted as a shorthand for `grafana-import`.
+
+Target precedence: `--endpoint`, `--region`, `grafanaImport.endpoint`, `grafanaImport.region`,
+`coralogix.region`. There is no built-in default — the command fails rather than guess a region, because a
+wrong guess publishes dashboards into a tenant nobody asked for.
+
+The **Coralogix** API key is used (`CX_API_KEY`, then `credentials.cxApiKey`); the hosted Grafana sits
+behind the Coralogix gateway and accepts it as a bearer token. Both `cxtp_` (team) and `cxup_` (user) keys
+work provided the resulting Grafana org role is Editor or Admin. Confirm before a large run:
+
+```bash
+curl -sS -H "Authorization: Bearer $CX_API_KEY" https://api.coralogix.com/grafana/api/user/orgs
+# => [{"orgId":…,"role":"Editor"}]
+```
+
+Note the Coralogix **UI** host (e.g. `watcher.coralogix.com`) is not the API host — use the `api.` host from
+the region table above.
+
+#### Folder grouping
+
+Source layout decides the grouping, so no configuration is needed for the common cases:
+
+- **A directory tree** (one subdirectory per team, as `grafana-backup/` produces) mirrors those
+  subdirectories into destination folders.
+- **A flat directory** falls back to splitting each filename on `grafanaImport.grouping.separator`.
+
+`--interactive` starts from that choice and lets you switch strategy, change the separator, rename folders,
+or put everything in one folder.
+
+#### What the transform changes
+
+Re-running an import is a no-op because of four things together: a stable `uid`, `overwrite: true`, and the
+removal of `id` and `version`. The uid is what Grafana matches on, `overwrite` waives its version check, a
+foreign numeric `id` would match an unrelated dashboard on the destination, and a foreign `version` would be
+written verbatim on create. Everything else is preserved.
+
+| Field | Behaviour |
+|---|---|
+| `uid` | Preserved. Derived deterministically from the source path when absent, invalid, or claimed by more than one file in the run |
+| `id`, `version`, `iteration` | Removed |
+| `meta`, `folderId`, `folderUid`, `slug`, `url` | Removed at the top level only — nested `meta` (Elasticsearch extended-stats config) survives |
+| `datasource` | Re-pointed; see below. Explicit `null`, `$variable` references and built-ins are left alone |
+| `templating.list[].query` | **Never** rewritten — it means something different for every variable type |
+| `templating.list[].current` | Re-pointed for `datasource` variables on schemaVersion ≥ 33 only |
+| `annotations`, `links`, `refresh`, `timezone`, `weekStart`, `tags`, `time` | Preserved |
+| `panels[].alert` | Dropped with a warning — pre-Grafana-9 rules cannot be recreated through this API |
+| `panels[].libraryPanel` | Kept with a warning when the uid is missing on the destination |
+| `__inputs`, `__requires` | Resolved and substituted, then removed |
+| `schemaVersion` | Preserved; the destination migrates it on load |
+
+Datasources are resolved in this order: explicit `datasourceUidMap` entry by source uid, then by source
+name, then a destination datasource with the same uid, then the same name, then the only one of that type
+(or the default among several). A reference that matches nothing is **left exactly as it was** and reported
+as a warning, so the panel says it cannot query rather than silently querying the wrong backend. Setting
+`allowTargetDefaultFallback` to `true` opts into pointing unmatched references at the default datasource.
+
+#### Grafana import settings
+
+```json
+{
+  "grafanaImport": {
+    "region": "eu1",
+    "endpoint": "",
+    "checkpointFile": "grafana-import-checkpoint.json",
+    "reportFile": "grafana-import-report.txt",
+    "maxRetries": 5,
+    "initialRetryDelaySeconds": 2,
+    "overwriteExisting": true,
+    "dryRun": false,
+    "message": "Imported by grafana-to-cx grafana-import",
+    "allowTargetDefaultFallback": false,
+    "datasourceUidMap": { "source-uid-or-name": "target-uid" },
+    "grouping": {
+      "separator": " - ",
+      "segmentCount": 2,
+      "segmentStart": 1,
+      "recursive": true,
+      "ungroupedFolderName": null
+    }
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `grafanaImport.region` | Region used to derive the Grafana base URL |
+| `grafanaImport.endpoint` | Explicit Grafana base URL; overrides `region` when non-empty |
+| `grafanaImport.checkpointFile` | Checkpoint path. Must differ from **both** `migration.checkpointFile` and `import.checkpointFile` |
+| `grafanaImport.reportFile` | Human-readable report path |
+| `grafanaImport.maxRetries` | Retryable failures become permanent after this many attempts |
+| `grafanaImport.overwriteExisting` | Whether to revisit dashboards already marked completed in the checkpoint. It does **not** control the `overwrite` flag on the save request, which is always `true` |
+| `grafanaImport.dryRun` | Default for `--dry-run` |
+| `grafanaImport.message` | Commit message recorded in the destination's dashboard version history |
+| `grafanaImport.allowTargetDefaultFallback` | Point unmatched datasources at the destination default instead of reporting them |
+| `grafanaImport.datasourceUidMap` | Source datasource uid (or legacy name) → destination uid. Wins over discovery |
+| `grafanaImport.grouping.*` | Same rules as `import.grouping`, but `recursive` defaults to `true` |
+
+`migrate`, `import` and `grafana-import` each keep their own checkpoint and report; the tool refuses to start
+if any two resolve to the same path.
 
 ### `verify`
 
 Convert, fetch from Coralogix, and compare conversion output:
 
 ```bash
-dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- verify ./dashboard.json -e https://api.coralogix.com/mgmt/openapi/latest -d DASHBOARD_ID
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- verify ./dashboard.json --region eu1 -d DASHBOARD_ID
 ```
 
 | Argument/Flag | Description |
 |---|---|
 | `<input>` | Input Grafana dashboard JSON file |
 | `-e`, `--endpoint` | Coralogix API endpoint |
+| `-r`, `--region` | Coralogix region; resolves to `https://<region-host>/mgmt/openapi/latest` |
+| `-s`, `--settings` | Path to settings JSON (default: `migration-settings.json`) |
 | `-d`, `--dashboard-id` | CX dashboard ID to verify against |
+| `-I`, `--interactive` | Pick the region interactively |
+
+Target precedence: `--endpoint`, `--region`, the interactive picker, `coralogix.region`. A target is only
+required with `-d` — without it `verify` prints a local conversion report and never contacts Coralogix, so
+it neither prompts nor fails on a missing region.
 
 ---
 

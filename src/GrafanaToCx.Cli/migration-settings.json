@@ -27,6 +27,41 @@
       ]
     }
   },
+  "import": {
+    "checkpointFile": "import-checkpoint.json",
+    "reportFile": "import-report.txt",
+    "maxRetries": 5,
+    "initialRetryDelaySeconds": 2,
+    "overwriteExisting": true,
+    "isLocked": false,
+    "grouping": {
+      "separator": " - ",
+      "segmentCount": 2,
+      "segmentStart": 1,
+      "recursive": false,
+      "ungroupedFolderName": null
+    }
+  },
+  "grafanaImport": {
+    "region": "eu1",
+    "endpoint": "",
+    "checkpointFile": "grafana-import-checkpoint.json",
+    "reportFile": "grafana-import-report.txt",
+    "maxRetries": 5,
+    "initialRetryDelaySeconds": 2,
+    "overwriteExisting": true,
+    "dryRun": false,
+    "message": "Imported by grafana-to-cx grafana-import",
+    "allowTargetDefaultFallback": false,
+    "datasourceUidMap": {},
+    "grouping": {
+      "separator": " - ",
+      "segmentCount": 2,
+      "segmentStart": 1,
+      "recursive": true,
+      "ungroupedFolderName": null
+    }
+  },
   "Serilog": {
     "MinimumLevel": "Information",
     "WriteTo": {

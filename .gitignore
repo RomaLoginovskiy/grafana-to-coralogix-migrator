@@ -57,7 +57,16 @@ migration-checkpoint.json
 migration-checkpoint.integration.json
 migration-report.txt
 migration-report.integration.txt
+import-checkpoint.json
+import-checkpoint.integration.json
+import-report.txt
+import-report.integration.txt
+grafana-import-checkpoint.json
+grafana-import-checkpoint.integration.json
+grafana-import-report.txt
+grafana-import-report.integration.txt
 grafana-backup.zip
+logs/
 WIDGET_TYPE_COVERAGE.md
 WIDGET_TYPE_VALIDATION_REPORT.md
 cx-folder-delete-backup-*.zip

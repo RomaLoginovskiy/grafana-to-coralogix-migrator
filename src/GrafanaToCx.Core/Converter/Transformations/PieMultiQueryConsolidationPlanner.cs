@@ -32,6 +32,13 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
         if (visibleTargets.Count < 2)
             return new TransformationPlan.Success(SelectedTargets: visibleTargets);
 
+        // Everything below this point is the Elasticsearch/Lucene merge path, and every one of its exits
+        // reduces the panel to a single target. A pie chart with no Elasticsearch targets takes the metrics
+        // branch instead, where PieChartPanelConverter merges the queries with label_replace — so it needs
+        // all of them. Dropping all but the first here would silently discard slices.
+        if (isPieChart && !visibleTargets.Any(IsElasticsearchTarget))
+            return new TransformationPlan.Success(SelectedTargets: visibleTargets);
+
         if (isTimeSeries && !_mergeOptions.IsAllowlistedType(context.PanelType))
             return new TransformationPlan.Success(SelectedTargets: visibleTargets);
 

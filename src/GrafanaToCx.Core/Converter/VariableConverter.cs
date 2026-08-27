@@ -169,6 +169,7 @@ public sealed class VariableConverter
         var currentValue = ExtractSingleValue(current["value"]);
         var currentLabel = ExtractSingleValue(current["text"]);
         var useMulti = includeAll || multi
+            || currentValueToken is JArray
             || string.IsNullOrEmpty(currentValue)
             || currentValue == "$__all";
 

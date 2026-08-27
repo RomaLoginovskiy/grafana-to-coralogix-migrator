@@ -2,6 +2,14 @@ namespace GrafanaToCx.Core.Migration;
 
 public static class RegionMapper
 {
+    /// <summary>
+    /// Every region this tool can resolve, in the order pickers should show them. Declared as an ordered
+    /// list rather than read back from <see cref="RegionBaseUrls"/>, whose enumeration order is an
+    /// implementation detail of <see cref="Dictionary{TKey,TValue}"/> and not part of its contract.
+    /// </summary>
+    public static IReadOnlyList<string> KnownRegions { get; } =
+        ["eu1", "eu2", "us1", "us2", "ap1", "ap2", "ap3", "in1"];
+
     private static readonly Dictionary<string, string> RegionBaseUrls = new(StringComparer.OrdinalIgnoreCase)
     {
         ["eu1"] = "https://api.coralogix.com",
@@ -13,6 +21,18 @@ public static class RegionMapper
         ["ap3"] = "https://api.ap3.coralogix.com",
         ["in1"] = "https://api.app.coralogix.in",
     };
+
+    /// <summary>
+    /// Returns the canonical spelling of <paramref name="region"/>, or null when it is not a known region.
+    /// </summary>
+    /// <remarks>
+    /// Lookup is case-insensitive but the result is not: a picker seeded with "EU1" would fail to match its
+    /// own "eu1" entry and silently show no default.
+    /// </remarks>
+    public static string? Normalize(string? region) =>
+        region is null
+            ? null
+            : KnownRegions.FirstOrDefault(known => string.Equals(known, region, StringComparison.OrdinalIgnoreCase));
 
     private static string GetBaseUrl(string region)
     {
