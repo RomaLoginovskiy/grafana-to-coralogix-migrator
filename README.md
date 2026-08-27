@@ -3,6 +3,7 @@
 A .NET 9 CLI tool that converts Grafana dashboards into Coralogix custom dashboard format.
 
 It supports:
+- Pre-migration assessment of a set of boards (`assess`)
 - Single-file conversion (`convert`)
 - Single-file conversion + upload (`push`)
 - Bulk migration from live Grafana (`migrate`)

@@ -18,7 +18,7 @@ public static class ArgumentParser
         {
             "convert" => ParseConvert(rest),
             "migrate" => ParseMigrate(rest),
-            "backup" => ParseBackup(rest),
+            "assess" => ParseAssess(rest),
             "verify" => ParseVerify(rest),
             "import" => ParseImport(rest),
             _ => new ParsedArgs(CommandKind.Interactive, new Dictionary<string, string?>())
@@ -85,54 +85,48 @@ public static class ArgumentParser
         return new ParsedArgs(CommandKind.Migrate, dict);
     }
 
-    private static ParsedArgs ParseBackup(ReadOnlySpan<string> rest)
+    private static ParsedArgs ParseAssess(ReadOnlySpan<string> rest)
     {
-        string? settings = "migration-settings.json";
+        string? input = null;
         string? output = null;
+        string? profile = null;
         string? region = null;
-        var interactive = false;
+        string? format = null;
 
         for (var i = 0; i < rest.Length; i++)
         {
             var arg = rest[i];
-            if (arg is "-s" or "--settings")
+            if (arg is "-f" or "--format")
             {
-                if (i + 1 < rest.Length)
-                {
-                    settings = rest[i + 1];
-                    i++;
-                }
+                if (i + 1 < rest.Length) { format = rest[i + 1]; i++; }
             }
             else if (arg is "-o" or "--output")
             {
-                if (i + 1 < rest.Length)
-                {
-                    output = rest[i + 1];
-                    i++;
-                }
+                if (i + 1 < rest.Length) { output = rest[i + 1]; i++; }
+            }
+            else if (arg is "-p" or "--profile")
+            {
+                if (i + 1 < rest.Length) { profile = rest[i + 1]; i++; }
             }
             else if (arg is "-r" or "--region")
             {
-                if (i + 1 < rest.Length)
-                {
-                    region = rest[i + 1];
-                    i++;
-                }
+                if (i + 1 < rest.Length) { region = rest[i + 1]; i++; }
             }
-            else if (arg is "-I" or "--interactive")
+            else if (!arg.StartsWith('-'))
             {
-                interactive = true;
+                input ??= arg;
             }
         }
 
         var dict = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
-            ["settings"] = settings,
+            ["input"] = input,
             ["output"] = output,
+            ["profile"] = profile,
             ["region"] = region,
-            ["interactive"] = interactive ? "true" : "false"
+            ["format"] = format
         };
-        return new ParsedArgs(CommandKind.Backup, dict);
+        return new ParsedArgs(CommandKind.Assess, dict);
     }
 
     private static ParsedArgs ParseVerify(ReadOnlySpan<string> rest)
@@ -211,7 +205,7 @@ public enum CommandKind
     Interactive,
     Convert,
     Migrate,
-    Backup,
+    Assess,
     Verify,
     Import
 }
