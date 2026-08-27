@@ -19,34 +19,85 @@ public sealed class VariableConverter
         _logger = logger;
     }
 
-    public JArray ConvertVariables(JArray grafanaVariables, ISet<string> discoveredMetrics)
+    public JArray ConvertVariables(
+        JArray grafanaVariables,
+        ISet<string> discoveredMetrics,
+        Action<DashboardConversionDiagnostic>? onDropped = null)
     {
         var result = new JArray();
         var sourceMetric = ResolveSourceMetric(discoveredMetrics);
 
         foreach (var varToken in grafanaVariables.Children<JObject>())
         {
+            var name = varToken.Value<string>("name") ?? "(unnamed)";
+            var varType = varToken.Value<string>("type") ?? "(untyped)";
+
             try
             {
                 var converted = ConvertVariable(varToken, sourceMetric);
                 if (converted != null)
                 {
                     result.Add(converted);
+                    continue;
                 }
+
+                onDropped?.Invoke(new DashboardConversionDiagnostic(
+                    "variable",
+                    name,
+                    DescribeDropReason(varToken, varType),
+                    DashboardDiagnosticCodes.Variable));
             }
             catch (Exception ex)
             {
-                // Warning, not Debug: a dropped variable leaves every ${name} reference in the dashboard's
-                // queries unresolved, so it must not disappear quietly.
-                _logger.LogWarning(
-                    "Dropped dashboard variable '{Variable}': {Error}",
-                    varToken.Value<string>("name") ?? "(unnamed)",
-                    ex.Message);
+                _logger.LogDebug("Failed to convert variable: {Error}", ex.Message);
+                onDropped?.Invoke(new DashboardConversionDiagnostic(
+                    "variable",
+                    name,
+                    $"Variable of type '{varType}' failed to convert: {ex.Message}",
+                    DashboardDiagnosticCodes.Variable,
+                    Outcome: "error"));
             }
         }
 
         result.Add(BuildIntervalVariable());
         return result;
+    }
+
+    /// <summary>
+    /// Whether a Grafana variable will be emitted as multi-value. Coralogix section repetition
+    /// only works against a multi-value variable, so this is checked before a repeat is honoured.
+    ///
+    /// Deliberately conservative — only an explicit <c>multi</c> or <c>includeAll</c> counts.
+    /// The conversion paths also treat an empty current value as multi, but that is incidental
+    /// rather than the author asking for multi-select, and over-reporting here would produce
+    /// sections that repeat exactly once.
+    /// </summary>
+    public static bool WillBeMultiValue(JObject varToken)
+    {
+        if (!IsConvertibleType(varToken.Value<string>("type")))
+            return false;
+
+        return (varToken.Value<bool?>("includeAll") ?? false)
+               || (varToken.Value<bool?>("multi") ?? false);
+    }
+
+    private static bool IsConvertibleType(string? varType) =>
+        varType is "query" or "interval" or "constant" or "custom";
+
+    private static string DescribeDropReason(JObject varToken, string varType)
+    {
+        // The name-based skip list is checked before type, since it wins inside ConvertVariable too.
+        if (SkipVariableNames.Contains(varToken.Value<string>("name") ?? string.Empty))
+            return "Datasource placeholder left behind by dashboard export; skipped deliberately.";
+
+        return varType switch
+        {
+            "datasource" => "Datasource picker variables have no Coralogix equivalent.",
+            "adhoc" => "Ad-hoc filter variables have no Coralogix equivalent.",
+            "query" => "Query variable uses a form the converter has no rule for "
+                       + "(not label_values, not an Elasticsearch terms query, and no static options to fall back on).",
+            _ => $"Variables of type '{varType}' are not converted."
+        };
     }
 
     private JObject? ConvertVariable(JObject varToken, string sourceMetric)
@@ -113,16 +164,10 @@ public sealed class VariableConverter
         var includeAll = varToken.Value<bool?>("includeAll") ?? false;
         var multi = varToken.Value<bool?>("multi") ?? false;
         var current = varToken["current"] as JObject ?? new JObject();
-
-        // A multi-select variable stores current.value as an array. Reading it with Value<string> throws,
-        // and the caller's catch turned that into a silently dropped variable — leaving every ${var}
-        // reference in the dashboard's queries dangling.
-        var currentValueToken = current["value"];
-        var currentValue = ExtractSingleValue(currentValueToken);
+        // A multi-select variable stores current.value/current.text as arrays, so read
+        // them through ExtractSingleValue rather than casting the token to string.
+        var currentValue = ExtractSingleValue(current["value"]);
         var currentLabel = ExtractSingleValue(current["text"]);
-        if (string.IsNullOrWhiteSpace(currentLabel))
-            currentLabel = currentValue;
-
         var useMulti = includeAll || multi
             || currentValueToken is JArray
             || string.IsNullOrEmpty(currentValue)
@@ -284,8 +329,10 @@ public sealed class VariableConverter
     private static JObject ConvertIntervalVariable(JObject varToken, string name)
     {
         var current = varToken["current"] as JObject ?? new JObject();
+        // Same array-shaped current guard as the query paths; an interval variable is
+        // rarely multi-select but the cast would throw identically if it were.
         var currentValue = ExtractSingleValue(current["value"]);
-        if (string.IsNullOrWhiteSpace(currentValue))
+        if (string.IsNullOrEmpty(currentValue))
             currentValue = "5m";
 
         return new JObject
@@ -384,15 +431,11 @@ public sealed class VariableConverter
         var includeAll = varToken.Value<bool?>("includeAll") ?? false;
         var multi = varToken.Value<bool?>("multi") ?? false;
         var current = varToken["current"] as JObject ?? new JObject();
-
-        // Same multi-select array hazard as the metrics path above.
-        var currentValueToken = current["value"];
-        var currentValue = ExtractSingleValue(currentValueToken);
+        // A multi-select variable stores current.value/current.text as arrays, so read
+        // them through ExtractSingleValue rather than casting the token to string.
+        var currentValue = ExtractSingleValue(current["value"]);
         var currentLabel = ExtractSingleValue(current["text"]);
-        if (string.IsNullOrWhiteSpace(currentLabel))
-            currentLabel = currentValue;
-
-        var useMulti = includeAll || multi || currentValueToken is JArray || string.IsNullOrEmpty(currentValue);
+        var useMulti = includeAll || multi || string.IsNullOrEmpty(currentValue);
         var keypath = new JArray(fieldName.Split('.').Cast<object>().ToArray());
 
         return new JObject

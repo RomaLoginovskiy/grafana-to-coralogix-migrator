@@ -21,7 +21,7 @@ public static class PromptMenus
         new("4", "Migrate – Bulk migrate from Grafana"),
         new("5", "Settings – Change connection settings"),
         new("6", "Cleanup – Backup and delete dashboards by folder"),
-        new("7", "Grafana Import – Publish local dashboards to hosted Grafana"),
+        new("7", "Backup – Download Grafana dashboards to a local ZIP"),
         new("0", "Exit")
     ];
 

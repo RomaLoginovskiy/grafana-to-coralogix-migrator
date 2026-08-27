@@ -17,6 +17,32 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     {
         "timeseries", "graph"
     };
+
+    /// <summary>
+    /// Grafana chrome — panels carrying no user-authored content. Dropped silently rather
+    /// than leaving a "not migrated" placeholder, since there is nothing to miss.
+    /// </summary>
+    private static readonly HashSet<string> ChromePanelTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "welcome", "dashlist", "news"
+    };
+
+    /// <summary>
+    /// Transformation ids the converter actually applies. Everything else is recorded as a
+    /// dashboard-level loss. Empty today: no planner reads a transformation id.
+    /// </summary>
+    private static readonly HashSet<string> ImplementedTransformationIds = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Panel types eligible for fan-out. Restricted to the stat family, where Grafana already
+    /// draws one tile per query so N widgets is what the user was looking at. Deliberately
+    /// excludes table (its queries are joined by a transformation into one view), piechart
+    /// (its queries are slices of one chart) and bargauge (buckets of one distribution).
+    /// </summary>
+    private static readonly HashSet<string> FanOutPanelTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "stat", "singlestat"
+    };
     private const string StatusHistoryPanelType = "status-history";
 
     private static readonly string[] SectionColors =
@@ -41,9 +67,13 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     private readonly DataTablePanelConverter _dataTableConverter = new();
     private readonly CompositeTransformationPlanner _transformationPlanner;
     private readonly List<PanelConversionDiagnostic> _conversionDiagnostics = [];
+    private readonly List<DashboardConversionDiagnostic> _dashboardDiagnostics = [];
     private readonly List<JObject> _conversionDecisionEvents = [];
+    private readonly HashSet<string> _honouredRepeatPanels = new(StringComparer.Ordinal);
+    private readonly List<JObject> _thresholdAnnotations = [];
 
     public IReadOnlyList<PanelConversionDiagnostic> ConversionDiagnostics => _conversionDiagnostics;
+    public IReadOnlyList<DashboardConversionDiagnostic> DashboardDiagnostics => _dashboardDiagnostics;
     public IReadOnlyList<JObject> ConversionDecisionEvents => _conversionDecisionEvents;
 
     public GrafanaToCxConverter(
@@ -64,7 +94,10 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     public JObject ConvertToJObject(string grafanaJson, ConversionOptions? options = null)
     {
         _conversionDiagnostics.Clear();
+        _dashboardDiagnostics.Clear();
         _conversionDecisionEvents.Clear();
+        _honouredRepeatPanels.Clear();
+        _thresholdAnnotations.Clear();
         var sourceToken = JToken.Parse(grafanaJson);
         var sourceObject = sourceToken as JObject ?? new JObject();
         var grafana = sourceObject["dashboard"] as JObject ?? sourceObject;
@@ -72,11 +105,114 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
         var discoveredMetrics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var customDashboard = InitializeDashboard(grafana, options);
+        RecordDashboardLevelLosses(grafana);
         ConvertPanels(grafana, customDashboard, discoveredMetrics, options);
+        customDashboard["annotations"] = new JArray(_thresholdAnnotations);
         ConvertVariables(grafana, customDashboard, discoveredMetrics);
         ApplyTimeFrame(grafana, customDashboard);
+        // A reference to a variable we could not convert would have the API reject the whole
+        // dashboard, so stand in a placeholder and say so.
+        foreach (var name in DanglingVariableReferences.Fill(customDashboard))
+        {
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "variable",
+                name,
+                "Referenced by a query but not convertible; a placeholder variable was added so "
+                + "the dashboard loads. Populate it to restore the original filtering.",
+                DashboardDiagnosticCodes.Variable,
+                Outcome: "placeholder"));
+        }
+
+        // Runs last: it needs the converted variables to know which are multi-value.
+        foreach (var name in PromqlVariableMatchers.Normalize(customDashboard).Distinct())
+        {
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "queryMatcher",
+                $"${{{name}}}",
+                "Trailing '.*' dropped from a variable matcher: it cannot survive unquoting, so a "
+                + "prefix match became an exact match.",
+                DashboardDiagnosticCodes.QueryMatcher,
+                Outcome: "degraded"));
+        }
 
         return customDashboard;
+    }
+
+    /// <summary>
+    /// Records dashboard-wide elements the converter has no target for. These have no
+    /// corresponding read anywhere in conversion, so without this they vanish unreported.
+    /// </summary>
+    private void RecordDashboardLevelLosses(JObject grafana)
+    {
+        foreach (var annotation in (grafana["annotations"]?["list"] as JArray ?? []).Children<JObject>())
+        {
+            // builtIn 1 is Grafana's own "Annotations & Alerts" entry, on every dashboard.
+            if (annotation.Value<int?>("builtIn") == 1)
+                continue;
+
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "annotation",
+                annotation.Value<string>("name") ?? "(unnamed)",
+                "Annotation queries are not emitted; event overlays will be absent.",
+                DashboardDiagnosticCodes.Annotation));
+        }
+
+        foreach (var link in (grafana["links"] as JArray ?? []).Children<JObject>())
+        {
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "dashboardLink",
+                link.Value<string>("title") is { Length: > 0 } t ? t : $"({link.Value<string>("type")})",
+                "Dashboard links are not emitted.",
+                DashboardDiagnosticCodes.DashboardLink));
+        }
+    }
+
+    /// <summary>
+    /// Records per-panel elements that are read past but never applied.
+    /// </summary>
+    private void RecordPanelLevelLosses(JObject panel, string panelTitle)
+    {
+        var visibleTargets = VisibleTargetSelector.Resolve(panel["targets"] as JArray ?? []);
+
+        foreach (var transformation in TransformationContext.GetTransformations(panel).Children<JObject>())
+        {
+            var id = transformation.Value<string>("id") ?? "(unnamed)";
+            if (ImplementedTransformationIds.Contains(id))
+                continue;
+
+            var reason = DescribeTransformationLoss(id, visibleTargets);
+            if (reason is null)
+                continue;
+
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "transformation",
+                id,
+                reason,
+                DashboardDiagnosticCodes.Transformation,
+                panelTitle));
+        }
+
+        if (panel["links"] is JArray links && links.Count > 0)
+        {
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "panelLink",
+                $"{links.Count} link(s)",
+                "Panel links are not emitted.",
+                DashboardDiagnosticCodes.PanelLink,
+                panelTitle));
+        }
+
+        if (panel.Value<string>("repeat") is { Length: > 0 } repeat
+            && !_honouredRepeatPanels.Contains(PanelIdentity(panel)))
+        {
+            AddDashboardDiagnostic(new DashboardConversionDiagnostic(
+                "panelRepeat",
+                $"${repeat}",
+                "Panel repeat is not expanded: no multi-value variable of that name exists, "
+                + "so one widget is emitted instead of one per value.",
+                DashboardDiagnosticCodes.PanelRepeat,
+                panelTitle));
+        }
     }
 
     private static JObject InitializeDashboard(JObject grafana, ConversionOptions? options)
@@ -104,6 +240,7 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     private void ConvertPanels(JObject grafana, JObject customDashboard, ISet<string> discoveredMetrics, ConversionOptions? options)
     {
         var panels = grafana["panels"] as JArray ?? new JArray();
+        var repeatableVariables = ResolveRepeatableVariableNames(grafana);
         var sections = GroupPanelsIntoSections(panels);
 
         if (sections.Count == 0 && panels.Count > 0)
@@ -117,8 +254,12 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
 
         foreach (var (title, sectionPanels) in sections.Where(s => s.panels.Count > 0))
         {
-            outputSections.Add(CreateSection(sectionPanels, title, colorIndex, discoveredMetrics, options));
-            colorIndex++;
+            foreach (var chunk in SplitOutRepeatingPanels(sectionPanels, title, repeatableVariables))
+            {
+                outputSections.Add(CreateSection(
+                    chunk.Panels, chunk.Title, colorIndex, discoveredMetrics, options, chunk.RepeatVariable));
+                colorIndex++;
+            }
         }
     }
 
@@ -177,11 +318,12 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
     }
 
     private JObject CreateSection(
-        List<JObject> panels,
+        IReadOnlyList<JObject> panels,
         string? sectionTitle,
         int colorIndex,
         ISet<string> discoveredMetrics,
-        ConversionOptions? options)
+        ConversionOptions? options,
+        string? repeatVariable = null)
     {
         const int maxWidgetsPerRow = 3;
         var rows = new JArray();
@@ -207,6 +349,31 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
                 continue;
             }
 
+            if (TryFanOutPanel(panel, options, out var fanOutPanels))
+            {
+                // Record against the original panel exactly once. The clones must not report,
+                // or a five-way fan-out would report the same transformation five times and
+                // the repeat — which belongs to the panel, not a slice — not at all.
+                RecordPanelLevelLosses(panel, ResolvePanelTitle(panel));
+
+                // Keep the group on its own row(s) so it still reads as one panel would have.
+                FlushWidgets(currentWidgets, rows);
+
+                foreach (var clone in fanOutPanels)
+                {
+                    if (currentWidgets.Count >= maxWidgetsPerRow)
+                        FlushWidgets(currentWidgets, rows);
+
+                    var fanOutWidget = ConvertPanelToWidget(
+                        clone, discoveredMetrics, options, recordPanelLevelLosses: false);
+                    if (fanOutWidget != null)
+                        currentWidgets.Add(fanOutWidget);
+                }
+
+                FlushWidgets(currentWidgets, rows);
+                continue;
+            }
+
             if (currentWidgets.Count >= maxWidgetsPerRow)
             {
                 FlushWidgets(currentWidgets, rows);
@@ -215,13 +382,14 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
             var widget = ConvertPanelToWidget(panel, discoveredMetrics, options);
             if (widget != null)
             {
+                CollectThresholdAnnotations(panel, widget);
                 currentWidgets.Add(widget);
             }
         }
 
         FlushWidgets(currentWidgets, rows);
 
-        var sectionOptions = BuildSectionOptions(sectionTitle, colorIndex);
+        var sectionOptions = BuildSectionOptions(sectionTitle, colorIndex, repeatVariable);
 
         return new JObject
         {
@@ -230,6 +398,110 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
             ["options"] = sectionOptions
         };
     }
+
+    /// <summary>
+    /// Splits a multi-query stat panel into one single-query panel per target. Each clone runs
+    /// through the normal pipeline, so the planner sees one target and reports no degradation.
+    /// Returns false — leaving the panel untouched — unless fan-out is enabled and applicable.
+    /// </summary>
+    private static bool TryFanOutPanel(
+        JObject panel,
+        ConversionOptions? options,
+        out IReadOnlyList<JObject> fanOutPanels)
+    {
+        fanOutPanels = [];
+
+        if (options?.FanOutMultiQueryPanels != true)
+            return false;
+
+        var panelType = PanelTypes.Normalize(panel.Value<string>("type"));
+        if (!FanOutPanelTypes.Contains(panelType))
+            return false;
+
+        var visibleTargets = VisibleTargetSelector.Resolve(panel["targets"] as JArray ?? []);
+        if (visibleTargets.Count < 2)
+            return false;
+
+        var panelTitle = ResolvePanelTitle(panel);
+
+        var clones = new List<JObject>(visibleTargets.Count);
+        for (var i = 0; i < visibleTargets.Count; i++)
+        {
+            var target = visibleTargets[i];
+            var clone = (JObject)panel.DeepClone();
+            clone["targets"] = new JArray(target.DeepClone());
+            clone["title"] = $"{panelTitle} — {DescribeTarget(target, i)}";
+            // The repeat belongs to the original panel, not to each slice of it.
+            clone.Remove("repeat");
+            clones.Add(clone);
+        }
+
+        fanOutPanels = clones;
+        return true;
+    }
+
+    /// <summary>
+    /// Names one slice of a fanned-out panel. Grafana labels these tiles with the target alias,
+    /// so that is the closest thing to what the user already reads on the panel.
+    /// </summary>
+    private static string DescribeTarget(JObject target, int index)
+    {
+        if (target.Value<string>("alias") is { Length: > 0 } alias)
+            return alias;
+        if (target.Value<string>("legendFormat") is { Length: > 0 } legend)
+            return legend;
+        if (target.Value<string>("refId") is { Length: > 0 } refId)
+            return refId;
+        return $"query {index + 1}";
+    }
+
+    /// <summary>
+    /// Transformations that combine several result frames into one. On a panel with a single
+    /// Elasticsearch query there is one frame, so nothing is joined and nothing is lost.
+    /// </summary>
+    private static readonly HashSet<string> FrameJoiningTransformations = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "merge", "joinByField"
+    };
+
+    /// <summary>
+    /// Says what a transformation costs this panel, or null when it costs nothing. Grafana
+    /// transformations run over query <em>results</em>; Coralogix has no equivalent stage, so
+    /// none are applied — but reporting every one as a loss overstates the damage, and the
+    /// point of these diagnostics is that a reader can trust them.
+    /// </summary>
+    private static string? DescribeTransformationLoss(string id, IReadOnlyList<JObject> visibleTargets)
+    {
+        if (FrameJoiningTransformations.Contains(id))
+        {
+            if (visibleTargets.Count > 1)
+            {
+                return "Transformation joins several query results, but the widget carries a single "
+                       + "query — the joined view cannot be reproduced.";
+            }
+
+            // A single Prometheus query still returns one frame per series, which this would
+            // have combined. A single Elasticsearch query returns one frame: nothing to join.
+            if (visibleTargets.Count == 0 || !IsPrometheusTarget(visibleTargets[0]))
+                return null;
+        }
+
+        return "Transformation is not applied; the widget shows untransformed query results.";
+    }
+
+    private static bool IsPrometheusTarget(JObject target)
+    {
+        var datasourceType = target["datasource"]?["type"]?.ToString();
+        if (string.Equals(datasourceType, "prometheus", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return target["expr"] is JValue;
+    }
+
+    private static string ResolvePanelTitle(JObject panel) =>
+        panel.Value<string>("title") is { Length: > 0 } title
+            ? title
+            : $"Panel #{panel.Value<int>("id")}";
 
     private static void FlushWidgets(List<JObject> widgets, JArray rows)
     {
@@ -252,34 +524,44 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
         };
     }
 
-    private JObject? ConvertPanelToWidget(JObject panel, ISet<string> discoveredMetrics, ConversionOptions? options)
+    private JObject? ConvertPanelToWidget(
+        JObject panel,
+        ISet<string> discoveredMetrics,
+        ConversionOptions? options,
+        bool recordPanelLevelLosses = true)
     {
-        var panelType = panel.Value<string>("type") ?? string.Empty;
-        var panelTitle = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}";
+        // Dispatch on the canonical type so legacy identifiers reach the modern converter,
+        // but report the raw type — a diagnostic naming "piechart" for a panel the user
+        // authored as "grafana-piechart-panel" would be a lie.
+        var rawPanelType = panel.Value<string>("type") ?? string.Empty;
+        var panelType = PanelTypes.Normalize(rawPanelType);
+        var panelTitle = ResolvePanelTitle(panel);
 
         var targets = panel["targets"] as JArray ?? new JArray();
         var transformations = TransformationContext.GetTransformations(panel);
+        if (recordPanelLevelLosses)
+            RecordPanelLevelLosses(panel, panelTitle);
         var plan = _transformationPlanner.Plan(new TransformationContext(panel, targets, transformations));
 
         if (plan is TransformationPlan.Failure failure)
         {
             AddDiagnostic(new PanelConversionDiagnostic(
                 panelTitle,
-                panelType,
+                rawPanelType,
                 "error",
                 failure.Reason,
                 failure.Code,
                 failure.DroppedSemantics,
                 failure.Approximation,
                 failure.ConfidenceScore));
-            return MarkdownPanelConverter.CreateErrorWidget(panelTitle, panelType, failure.Reason);
+            return MarkdownPanelConverter.CreateErrorWidget(panelTitle, rawPanelType, failure.Reason);
         }
 
         if (plan is TransformationPlan.Success { Decision: not null } plannedDecision)
         {
             AddDiagnostic(new PanelConversionDiagnostic(
                 panelTitle,
-                panelType,
+                rawPanelType,
                 plannedDecision.Decision.Outcome,
                 plannedDecision.Decision.Reason,
                 plannedDecision.Decision.Code,
@@ -306,7 +588,7 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
             {
                 AddDiagnostic(new PanelConversionDiagnostic(
                     panelTitle,
-                    panelType,
+                    rawPanelType,
                     "fallback",
                     "Converted with lineChart fallback.",
                     "DGR-LIN-001",
@@ -322,7 +604,7 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
         {
             AddDiagnostic(new PanelConversionDiagnostic(
                 panelTitle,
-                panelType,
+                rawPanelType,
                 "skipped",
                 "Panel converter produced no widget (empty/hidden/invalid targets).",
                 "UNS-TGT-001",
@@ -342,14 +624,19 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
         {
             AddDiagnostic(new PanelConversionDiagnostic(
                 panelTitle,
-                panelType,
+                rawPanelType,
                 "skipped",
                 "Unsupported Grafana panel type.",
                 "UNS-PNL-001",
                 [],
                 "none",
                 1.0));
-            return null;
+
+            // A panel that showed real data leaves a marker so the absence is visible on the
+            // dashboard; Grafana's own chrome carries nothing to miss and goes quietly.
+            return ChromePanelTypes.Contains(panelType)
+                ? null
+                : MarkdownPanelConverter.CreateNotMigratedWidget(panelTitle, rawPanelType);
         }
 
         if (TryConvertShapeBasedFallback(panel, panelType, panelTitle, discoveredMetrics, plan, out var unsupportedFallbackWidget))
@@ -543,32 +830,125 @@ public sealed class GrafanaToCxConverter : IGrafanaToCxConverter
         });
     }
 
-    private static JObject BuildSectionOptions(string? sectionTitle, int colorIndex)
+    /// <summary>
+    /// One chunk of a Grafana row after repeating panels have been separated out. Coralogix
+    /// repeats a whole section, so a repeating panel cannot share one with its neighbours.
+    /// </summary>
+    private sealed record SectionChunk(IReadOnlyList<JObject> Panels, string? Title, string? RepeatVariable);
+
+    /// <summary>
+    /// Names of variables a section may repeat over: present on the dashboard and multi-value.
+    /// The API does not validate the reference, so a dangling name would fail silently at
+    /// render time rather than being caught by the pre-upload check.
+    /// </summary>
+    private static HashSet<string> ResolveRepeatableVariableNames(JObject grafana)
     {
-        if (string.IsNullOrWhiteSpace(sectionTitle))
+        var names = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var variable in (grafana["templating"]?["list"] as JArray ?? []).Children<JObject>())
+        {
+            var name = variable.Value<string>("name");
+            if (!string.IsNullOrEmpty(name) && VariableConverter.WillBeMultiValue(variable))
+                names.Add(name);
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Splits a row so that each repeating panel gets a section of its own, preserving document
+    /// order. A panel whose repeat variable is missing or single-valued stays where it is and is
+    /// reported as a loss.
+    /// </summary>
+    private IEnumerable<SectionChunk> SplitOutRepeatingPanels(
+        IReadOnlyList<JObject> panels,
+        string? title,
+        IReadOnlySet<string> repeatableVariables)
+    {
+        var pending = new List<JObject>();
+
+        foreach (var panel in panels)
+        {
+            var repeat = panel.Value<string>("repeat");
+            if (string.IsNullOrEmpty(repeat) || !repeatableVariables.Contains(repeat))
+            {
+                pending.Add(panel);
+                continue;
+            }
+
+            if (pending.Count > 0)
+            {
+                yield return new SectionChunk(pending.ToList(), title, null);
+                pending.Clear();
+            }
+
+            _honouredRepeatPanels.Add(PanelIdentity(panel));
+            yield return new SectionChunk([panel], ResolvePanelTitle(panel), repeat);
+        }
+
+        if (pending.Count > 0)
+            yield return new SectionChunk(pending, title, null);
+    }
+
+    /// <summary>
+    /// Grafana draws thresholds as horizontal lines on a time series. Coralogix has no
+    /// equivalent on the widget, so they become dashboard annotations scoped to it.
+    /// Only line charts: gauges already carry their thresholds natively.
+    /// </summary>
+    private void CollectThresholdAnnotations(JObject panel, JObject widget)
+    {
+        if (widget["definition"]?["lineChart"] is null)
+            return;
+
+        var widgetId = widget["id"]?["value"]?.ToString();
+        if (string.IsNullOrEmpty(widgetId))
+            return;
+
+        var annotations = ThresholdAnnotations.Build(panel, widgetId, ResolvePanelTitle(panel));
+        if (annotations.Count == 0)
+            return;
+
+        _thresholdAnnotations.AddRange(annotations);
+    }
+
+    private static string PanelIdentity(JObject panel) =>
+        $"{panel.Value<int?>("id")}|{panel.Value<string>("title")}";
+
+    private static JObject BuildSectionOptions(string? sectionTitle, int colorIndex, string? repeatVariable = null)
+    {
+        // SectionOptions is a oneof: custom XOR internal. A repeating section must therefore
+        // use custom, which also means it needs a name.
+        if (string.IsNullOrWhiteSpace(sectionTitle) && repeatVariable is null)
         {
             return new JObject { ["internal"] = new JObject() };
         }
 
         var color = SectionColors[colorIndex % SectionColors.Length];
-
-        return new JObject
+        var custom = new JObject
         {
-            ["custom"] = new JObject
-            {
-                ["name"] = sectionTitle,
-                ["collapsed"] = false,
-                ["color"] = new JObject { ["predefined"] = color }
-            }
+            ["name"] = string.IsNullOrWhiteSpace(sectionTitle) ? $"${repeatVariable}" : sectionTitle,
+            ["collapsed"] = false,
+            ["color"] = new JObject { ["predefined"] = color }
         };
+
+        if (repeatVariable is not null)
+            custom["repetitiveVar"] = new JObject { ["name"] = repeatVariable };
+
+        return new JObject { ["custom"] = custom };
     }
 
     private void ConvertVariables(JObject grafana, JObject customDashboard, ISet<string> discoveredMetrics)
     {
         var grafanaVariables = grafana["templating"]?["list"] as JArray ?? new JArray();
         var variableConverter = new VariableConverter(_logger);
-        customDashboard["variablesV2"] = variableConverter.ConvertVariables(grafanaVariables, discoveredMetrics);
+        customDashboard["variablesV2"] = variableConverter.ConvertVariables(
+            grafanaVariables,
+            discoveredMetrics,
+            onDropped: AddDashboardDiagnostic);
     }
+
+    private void AddDashboardDiagnostic(DashboardConversionDiagnostic diagnostic) =>
+        _dashboardDiagnostics.Add(diagnostic);
 
     private static void ApplyTimeFrame(JObject grafana, JObject customDashboard)
     {

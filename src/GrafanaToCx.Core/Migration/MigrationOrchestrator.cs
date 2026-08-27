@@ -13,6 +13,7 @@ public sealed class MigrationOrchestrator
     private readonly ICoralogixDashboardsClient _cxClient;
     private readonly ICoralogixFoldersClient? _cxFoldersClient;
     private readonly GrafanaDashboardBackupService? _backupService;
+    private readonly CxCliDashboardChecker? _cxChecker;
     private readonly DashboardValidator _validator;
     private readonly CheckpointStore _checkpoint;
     private readonly MigrationReport _report;
@@ -30,13 +31,15 @@ public sealed class MigrationOrchestrator
         MigrationSettings settings,
         ILogger<MigrationOrchestrator> logger,
         ICoralogixFoldersClient? cxFoldersClient = null,
-        GrafanaDashboardBackupService? backupService = null)
+        GrafanaDashboardBackupService? backupService = null,
+        CxCliDashboardChecker? cxChecker = null)
     {
         _grafanaClient = grafanaClient;
         _converter = converter;
         _cxClient = cxClient;
         _cxFoldersClient = cxFoldersClient;
         _backupService = backupService;
+        _cxChecker = cxChecker;
         _validator = validator;
         _checkpoint = checkpoint;
         _report = report;
@@ -97,7 +100,11 @@ public sealed class MigrationOrchestrator
                 cxFolderId = _settings.Coralogix.FolderId;
             }
 
-            var options = new ConversionOptions { FolderId = cxFolderId };
+            var options = new ConversionOptions
+            {
+                FolderId = cxFolderId,
+                FanOutMultiQueryPanels = _settings.Migration.FanOutMultiQueryPanels
+            };
             await ProcessFolderAsync(folder, options, ct);
         }
 
@@ -154,7 +161,8 @@ public sealed class MigrationOrchestrator
 
         _checkpoint.Upsert(entry);
         await _checkpoint.SaveAsync(ct);
-        _report.Add(BuildReportEntry(folder.Title, entry, _converter.ConversionDiagnostics));
+        _report.Add(BuildReportEntry(
+            folder.Title, entry, _converter.ConversionDiagnostics, _converter.DashboardDiagnostics));
     }
 
     private async Task AttemptMigrationAsync(CheckpointEntry entry, ConversionOptions options, CancellationToken ct)
@@ -188,6 +196,9 @@ public sealed class MigrationOrchestrator
                 return;
             }
 
+            if (!await PassesCxCheckAsync(entry, converted, ct))
+                return;
+
             if (_settings.Coralogix.OverwriteExisting)
             {
                 var existingId = FindExistingCxId(entry, converted, options.FolderId);
@@ -213,6 +224,42 @@ public sealed class MigrationOrchestrator
             _logger.LogError(ex, "Unexpected error migrating '{Title}'.", entry.GrafanaTitle);
             MarkFailed(entry, CheckpointStatus.FailedCritical, $"Unexpected error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Validates against the live API before uploading, when the cx CLI is available. A
+    /// dashboard the API would reject is failed here rather than sent and refused, so the
+    /// reason lands in the report instead of an upload error. Warnings do not block.
+    /// </summary>
+    private async Task<bool> PassesCxCheckAsync(CheckpointEntry entry, JObject converted, CancellationToken ct)
+    {
+        if (_cxChecker is null || !_cxChecker.IsInstalled)
+            return true;
+
+        var result = await _cxChecker.CheckAsync(converted, ct);
+        if (!result.Ran)
+        {
+            _logger.LogDebug("cx check skipped for '{Title}': {Reason}", entry.GrafanaTitle, result.SkipReason);
+            return true;
+        }
+
+        foreach (var warning in result.Issues.Where(i => !i.IsError))
+        {
+            _logger.LogWarning("cx check warning on '{Title}' at {Location}: {Message}",
+                entry.GrafanaTitle, warning.Location, warning.Message);
+        }
+
+        if (!result.HasErrors)
+            return true;
+
+        var errors = result.Issues.Where(i => i.IsError).ToList();
+        var summary = string.Join("; ", errors.Take(3).Select(e => $"{e.Location}: {e.Message}"));
+        if (errors.Count > 3)
+            summary += $" (+{errors.Count - 3} more)";
+
+        _logger.LogError("cx check rejected '{Title}': {Summary}", entry.GrafanaTitle, summary);
+        MarkFailed(entry, CheckpointStatus.FailedCritical, $"Coralogix validation failed: {summary}");
+        return false;
     }
 
     private string? FindExistingCxId(CheckpointEntry entry, JObject converted, string? folderId)
@@ -340,7 +387,8 @@ public sealed class MigrationOrchestrator
     private static MigrationReportEntry BuildReportEntry(
         string folderTitle,
         CheckpointEntry entry,
-        IReadOnlyList<PanelConversionDiagnostic>? conversionDiagnostics = null) =>
+        IReadOnlyList<PanelConversionDiagnostic>? conversionDiagnostics = null,
+        IReadOnlyList<DashboardConversionDiagnostic>? dashboardDiagnostics = null) =>
         new()
         {
             FolderTitle = folderTitle,
@@ -348,9 +396,7 @@ public sealed class MigrationOrchestrator
             Status = entry.Status,
             CxDashboardId = entry.CxDashboardId,
             ErrorMessage = entry.ErrorMessage,
-            // Copy: IGrafanaToCxConverter.ConversionDiagnostics exposes the converter's live backing list,
-            // which is cleared on every ConvertToJObject call. Storing the reference makes all report
-            // entries alias one list, so the built report shows the last dashboard's diagnostics for all.
-            ConversionDiagnostics = conversionDiagnostics?.ToList() ?? []
+            ConversionDiagnostics = conversionDiagnostics ?? [],
+            DashboardDiagnostics = dashboardDiagnostics ?? []
         };
 }

@@ -31,6 +31,7 @@ public static class ArgumentParser
         {
             "convert" => ParseConvert(rest),
             "migrate" => ParseMigrate(rest),
+            "assess" => ParseAssess(rest),
             "verify" => ParseVerify(rest),
             "import" => ParseImport(rest),
             "grafana-import" or "g2g" => ParseGrafanaImport(rest),
@@ -145,6 +146,50 @@ public static class ArgumentParser
             ["interactive"] = interactive ? "true" : "false"
         };
         return new ParsedArgs(CommandKind.Migrate, dict);
+    }
+
+    private static ParsedArgs ParseAssess(ReadOnlySpan<string> rest)
+    {
+        string? input = null;
+        string? output = null;
+        string? profile = null;
+        string? region = null;
+        string? format = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (arg is "-f" or "--format")
+            {
+                if (i + 1 < rest.Length) { format = rest[i + 1]; i++; }
+            }
+            else if (arg is "-o" or "--output")
+            {
+                if (i + 1 < rest.Length) { output = rest[i + 1]; i++; }
+            }
+            else if (arg is "-p" or "--profile")
+            {
+                if (i + 1 < rest.Length) { profile = rest[i + 1]; i++; }
+            }
+            else if (arg is "-r" or "--region")
+            {
+                if (i + 1 < rest.Length) { region = rest[i + 1]; i++; }
+            }
+            else if (!arg.StartsWith('-'))
+            {
+                input ??= arg;
+            }
+        }
+
+        var dict = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["input"] = input,
+            ["output"] = output,
+            ["profile"] = profile,
+            ["region"] = region,
+            ["format"] = format
+        };
+        return new ParsedArgs(CommandKind.Assess, dict);
     }
 
     private static ParsedArgs ParseVerify(ReadOnlySpan<string> rest)
@@ -357,6 +402,7 @@ public enum CommandKind
     Interactive,
     Convert,
     Migrate,
+    Assess,
     Verify,
     Import,
     GrafanaImport

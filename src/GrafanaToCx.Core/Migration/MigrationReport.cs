@@ -11,6 +11,7 @@ public sealed class MigrationReportEntry
     public string? CxDashboardId { get; init; }
     public string? ErrorMessage { get; init; }
     public IReadOnlyList<PanelConversionDiagnostic> ConversionDiagnostics { get; init; } = [];
+    public IReadOnlyList<DashboardConversionDiagnostic> DashboardDiagnostics { get; init; } = [];
 }
 
 public sealed class MigrationReport
@@ -55,7 +56,52 @@ public sealed class MigrationReport
             }
         }
 
+        AppendDashboardLosses(sb);
+
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Elements that are not panels — annotations, links, repeats, transformations, variables.
+    /// Reported in their own section, grouped by kind, because a long flat list of these
+    /// would bury the panel diagnostics above.
+    /// </summary>
+    private void AppendDashboardLosses(StringBuilder sb)
+    {
+        var affected = _entries.Where(e => e.DashboardDiagnostics.Count > 0).ToList();
+        if (affected.Count == 0)
+            return;
+
+        var total = affected.Sum(e => e.DashboardDiagnostics.Count);
+
+        sb.AppendLine();
+        sb.AppendLine("Elements not migrated");
+        sb.AppendLine("=====================");
+        sb.AppendLine($"{total} element(s) across {affected.Count} dashboard(s) have no conversion path.");
+        sb.AppendLine("These are not panels and do not appear above.");
+        sb.AppendLine();
+
+        foreach (var kind in affected
+                     .SelectMany(e => e.DashboardDiagnostics)
+                     .GroupBy(d => d.ElementKind)
+                     .OrderByDescending(g => g.Count()))
+        {
+            sb.AppendLine($"{kind.Key} ({kind.Count()})");
+            foreach (var byName in kind.GroupBy(d => d.ElementName).OrderByDescending(g => g.Count()))
+                sb.AppendLine($"  - {byName.Key} x{byName.Count()}");
+        }
+
+        sb.AppendLine();
+
+        foreach (var entry in affected)
+        {
+            sb.AppendLine($"[LOST] {entry.FolderTitle} / {entry.DashboardTitle}");
+            foreach (var diagnostic in entry.DashboardDiagnostics)
+            {
+                var where = diagnostic.PanelTitle is { Length: > 0 } p ? $" [panel: {p}]" : string.Empty;
+                sb.AppendLine($"  - {diagnostic.ElementKind} '{diagnostic.ElementName}'{where}: {diagnostic.Reason}");
+            }
+        }
     }
 
     public async Task SaveAsync(string filePath, CancellationToken ct = default)

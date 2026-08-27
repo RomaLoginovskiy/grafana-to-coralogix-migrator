@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using GrafanaToCx.Core.ApiClient;
+using GrafanaToCx.Core.Assessment;
 using GrafanaToCx.Core.Converter;
 using GrafanaToCx.Core.Converter.Transformations;
 using GrafanaToCx.Core.GrafanaToGrafana;
@@ -90,6 +91,116 @@ public sealed class CommandHandlers
             var outputFile = Path.Combine(outputDir, Path.GetFileName(file));
             await ConvertFileAsync(converter, file, outputFile);
         }
+    }
+
+    // ── Assess ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reports how a set of Grafana dashboards would fare, without uploading anything.
+    /// Accepts a directory of dashboard JSON or a backup .zip.
+    /// </summary>
+    public async Task<int> RunAssessAsync(
+        string input, string? output, string? profile, string? region, string? format = null)
+    {
+        if (!TryParseReportFormat(format, out var reportFormat))
+        {
+            Console.Error.WriteLine($"Error: unknown format '{format}'. Use 'text' or 'markdown'.");
+            return 1;
+        }
+
+        var sources = LoadDashboardSources(input);
+        if (sources is null)
+            return 1;
+
+        if (sources.Count == 0)
+        {
+            Console.Error.WriteLine($"No dashboard JSON found in '{input}'.");
+            return 1;
+        }
+
+        // Validation against the live API is a bonus, not a requirement: without it the report
+        // still says what conversion loses, it just cannot say what Coralogix would refuse.
+        var checker = new CxCliDashboardChecker(
+            _loggerFactory.CreateLogger<CxCliDashboardChecker>(),
+            Environment.GetEnvironmentVariable("CX_API_KEY") ?? string.Empty,
+            region ?? "eu1",
+            profile);
+
+        if (!checker.IsInstalled)
+            Console.WriteLine("cx CLI not found — assessing conversion only, without API validation.");
+
+        var assessor = new MigrationAssessor(CreateConverter(), checker);
+        var assessments = new List<DashboardAssessment>(sources.Count);
+
+        Console.WriteLine($"Assessing {sources.Count} dashboard(s)...");
+        foreach (var (name, json) in sources)
+            assessments.Add(await assessor.AssessAsync(name, json));
+
+        var report = AssessmentReport.Build(assessments, reportFormat);
+        Console.WriteLine();
+        Console.WriteLine(report);
+
+        if (!string.IsNullOrWhiteSpace(output))
+        {
+            await File.WriteAllTextAsync(output, report);
+            Console.WriteLine($"Report written to {Path.GetFullPath(output)}");
+        }
+
+        // Non-zero when anything would be refused outright, so this can gate a pipeline.
+        return assessments.Any(a => a.Verdict is AssessmentVerdict.Rejected or AssessmentVerdict.Failed)
+            ? 1
+            : 0;
+    }
+
+    private static bool TryParseReportFormat(string? format, out AssessmentReportFormat parsed)
+    {
+        if (string.IsNullOrWhiteSpace(format))
+        {
+            parsed = AssessmentReportFormat.Text;
+            return true;
+        }
+
+        return Enum.TryParse(format, ignoreCase: true, out parsed);
+    }
+
+    private static List<(string Name, string Json)>? LoadDashboardSources(string input)
+    {
+        var sources = new List<(string, string)>();
+
+        if (Directory.Exists(input))
+        {
+            foreach (var file in Directory.GetFiles(input, "*.json", SearchOption.AllDirectories).OrderBy(f => f))
+                sources.Add((Path.GetRelativePath(input, file), File.ReadAllText(file)));
+
+            return sources;
+        }
+
+        if (!File.Exists(input))
+        {
+            Console.Error.WriteLine($"Error: '{input}' not found.");
+            return null;
+        }
+
+        if (input.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            using var archive = System.IO.Compression.ZipFile.OpenRead(input);
+            foreach (var entry in archive.Entries.OrderBy(e => e.FullName))
+            {
+                if (!entry.FullName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // A backup archive carries a _manifest.json describing the backup itself.
+                if (Path.GetFileName(entry.FullName).StartsWith('_'))
+                    continue;
+
+                using var reader = new StreamReader(entry.Open());
+                sources.Add((entry.FullName, reader.ReadToEnd()));
+            }
+
+            return sources;
+        }
+
+        sources.Add((Path.GetFileName(input), File.ReadAllText(input)));
+        return sources;
     }
 
     // ── Verify ──────────────────────────────────────────────────────────────
@@ -207,6 +318,150 @@ public sealed class CommandHandlers
         }
 
         return 1;
+    }
+
+    // ── Backup ───────────────────────────────────────────────────────────────
+
+    private const string DefaultBackupFile = "grafana-backup.zip";
+
+    /// <summary>
+    /// Downloads Grafana dashboards into a local ZIP and stops there — no conversion,
+    /// no Coralogix connection. This is the backup half of <c>migrate</c> on its own.
+    /// </summary>
+    public async Task<int> RunBackupAsync(string settingsFile, string? output, string? regionOverride, bool interactive)
+    {
+        MigrationSettings settings;
+
+        if (File.Exists(settingsFile))
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddJsonFile(Path.GetFullPath(settingsFile), optional: false)
+                .Build();
+            settings = configuration.Get<MigrationSettings>() ?? new MigrationSettings();
+        }
+        else if (!string.IsNullOrWhiteSpace(regionOverride))
+        {
+            // --region makes the settings file optional: everything else backup needs has a default.
+            Console.WriteLine($"Settings file '{settingsFile}' not found — using defaults with region '{regionOverride}'.");
+            settings = new MigrationSettings();
+        }
+        else
+        {
+            Console.Error.WriteLine($"Error: settings file '{settingsFile}' not found. Pass --settings <path> or --region <code>.");
+            return 1;
+        }
+
+        var region = string.IsNullOrWhiteSpace(regionOverride) ? settings.Grafana.Region : regionOverride;
+
+        string grafanaEndpoint;
+        try
+        {
+            grafanaEndpoint = RegionMapper.ResolveGrafana(region);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+
+        var grafanaApiKey = Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
+        if (string.IsNullOrWhiteSpace(grafanaApiKey))
+            grafanaApiKey = settings.Credentials.GrafanaApiKey;
+        if (string.IsNullOrWhiteSpace(grafanaApiKey))
+        {
+            Console.Error.WriteLine("Error: Grafana API key is required. Set GRAFANA_API_KEY or provide credentials.grafanaApiKey in settings.");
+            return 1;
+        }
+
+        var backupFile = !string.IsNullOrWhiteSpace(output)
+            ? output
+            : !string.IsNullOrWhiteSpace(settings.Migration.BackupFile)
+                ? settings.Migration.BackupFile
+                : DefaultBackupFile;
+
+        using var grafanaClient = new GrafanaClient(
+            _loggerFactory.CreateLogger<GrafanaClient>(),
+            grafanaEndpoint,
+            grafanaApiKey);
+
+        Console.WriteLine($"Fetching folders from {grafanaEndpoint} ...");
+
+        // In interactive mode the on-screen picker is the filter, so ask for every folder.
+        var folderFilter = interactive ? Array.Empty<string>() : (IReadOnlyList<string>)settings.Grafana.Folders;
+
+        List<GrafanaFolder> folders;
+        try
+        {
+            folders = await grafanaClient.GetFoldersAsync(folderFilter);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A rejected key can come back as a 2xx non-JSON body, which the client parses eagerly.
+            Console.Error.WriteLine($"Error: could not read folders from Grafana — {ex.Message}");
+            Console.Error.WriteLine("Check that GRAFANA_API_KEY is valid for this region.");
+            return 1;
+        }
+
+        if (folders.Count == 0)
+        {
+            Console.Error.WriteLine("No Grafana folders found (check the API key, region, and grafana.folders filter).");
+            return 1;
+        }
+
+        if (interactive)
+        {
+            var selected = MultiSelectWithFallback.SelectRequired(
+                "Select folders to back up",
+                folders,
+                f => f.Title);
+
+            if (selected.Count == 0)
+            {
+                Console.Error.WriteLine("No folders selected.");
+                return 1;
+            }
+
+            folders = selected.ToList();
+        }
+
+        Console.WriteLine($"Backing up {folders.Count} folder(s) to '{backupFile}' ...");
+
+        var backupService = new GrafanaDashboardBackupService(
+            grafanaClient,
+            _loggerFactory.CreateLogger<GrafanaDashboardBackupService>());
+
+        GrafanaDashboardBackupResult result;
+        try
+        {
+            result = await backupService.BackupAsync(folders, backupFile);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"Error: backup failed — {ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("══ Backup Summary ═════════════════════════");
+        Console.WriteLine($"  Archive               : {Path.GetFullPath(backupFile)}");
+        Console.WriteLine($"  Folders               : {folders.Count}");
+        Console.WriteLine($"  Dashboards saved      : {result.SavedDashboards}/{result.TotalDashboards}");
+
+        if (result.FailedFolders.Count > 0)
+            Console.WriteLine($"  Folders skipped       : {string.Join(", ", result.FailedFolders)}");
+        if (result.FailedDashboards.Count > 0)
+            Console.WriteLine($"  Dashboards skipped    : {string.Join(", ", result.FailedDashboards)}");
+
+        if (!result.Success)
+        {
+            Console.Error.WriteLine("Backup incomplete — see _manifest.json inside the archive.");
+            return 1;
+        }
+
+        if (result.TotalDashboards == 0)
+            Console.WriteLine("  Note                  : selected folders contain no dashboards.");
+
+        return 0;
     }
 
     // ── Migrate ──────────────────────────────────────────────────────────────
@@ -357,6 +612,15 @@ public sealed class CommandHandlers
             grafanaClient,
             _loggerFactory.CreateLogger<GrafanaDashboardBackupService>());
 
+        // Optional pre-upload validation against the live API; a no-op unless `cx` is installed.
+        var cxChecker = new CxCliDashboardChecker(
+            _loggerFactory.CreateLogger<CxCliDashboardChecker>(),
+            cxApiKey,
+            settings.Coralogix.Region,
+            settings.Migration.CxCliProfile);
+        if (cxChecker.IsInstalled)
+            Console.WriteLine("cx CLI detected — dashboards will be validated before upload.");
+
         var orchestrator = new MigrationOrchestrator(
             grafanaClient,
             converter,
@@ -367,7 +631,8 @@ public sealed class CommandHandlers
             settings,
             _loggerFactory.CreateLogger<MigrationOrchestrator>(),
             structureFoldersClient,
-            backupService);
+            backupService,
+            cxChecker);
 
         await orchestrator.RunAsync();
         return 0;
@@ -607,6 +872,9 @@ public sealed class CommandHandlers
                 case "7":
                     await RunGrafanaImportMenuAsync(config, settingsFile, session);
                     break;
+                case "7":
+                    await RunBackupMenuAsync(settingsFile);
+                    break;
                 case "0":
                     await store.SaveAsync(session);
                     Console.WriteLine();
@@ -762,7 +1030,38 @@ public sealed class CommandHandlers
         return (config, settingsFile);
     }
 
-    private async Task RunCleanupFoldersMenuAsync(SessionConfig config, InteractiveSession session)
+    private async Task RunBackupMenuAsync(string settingsFile)
+    {
+        var grafanaKey = Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
+        if (string.IsNullOrEmpty(grafanaKey))
+        {
+            grafanaKey = Prompt.Password("Grafana API key", validators: [Validators.Required()]);
+            if (string.IsNullOrEmpty(grafanaKey))
+            {
+                Console.Error.WriteLine("Grafana API key is required.");
+                return;
+            }
+
+            // RunBackupAsync reads the key from the environment or the settings file, so hand
+            // the prompted value over the same way the rest of the session does.
+            Environment.SetEnvironmentVariable("GRAFANA_API_KEY", grafanaKey);
+        }
+        else
+        {
+            Console.WriteLine("Using GRAFANA_API_KEY from environment.");
+        }
+
+        settingsFile = Prompt.Input<string>("Settings file", defaultValue: settingsFile);
+        var output = Prompt.Input<string>("Output ZIP (Enter = use settings)", defaultValue: string.Empty);
+
+        await RunBackupAsync(
+            settingsFile,
+            string.IsNullOrWhiteSpace(output) ? null : output,
+            regionOverride: null,
+            interactive: true);
+    }
+
+    private async Task RunCleanupFoldersMenuAsync(SessionConfig config)
     {
         using var foldersClient = new CoralogixFoldersClient(
             _loggerFactory.CreateLogger<CoralogixFoldersClient>(), config.CxEndpoint, config.CxApiKey);

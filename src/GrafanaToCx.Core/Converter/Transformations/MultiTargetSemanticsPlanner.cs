@@ -18,12 +18,24 @@ public sealed class MultiTargetSemanticsPlanner : ITransformationPlanner
         "singlestat"
     };
 
+    /// <summary>
+    /// Panel types that render static content and legitimately carry no targets. Without
+    /// this exemption they fail the zero-target check and convert into an error widget.
+    /// </summary>
+    private static readonly HashSet<string> QuerylessPanelTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "text"
+    };
+
     public TransformationPlan Plan(TransformationContext context)
     {
         var visibleTargets = VisibleTargetSelector.Resolve(context.Targets);
 
         if (visibleTargets.Count == 0)
         {
+            if (QuerylessPanelTypes.Contains(context.PanelType))
+                return new TransformationPlan.Success(SelectedTargets: visibleTargets);
+
             return new TransformationPlan.Failure(
                 "No visible targets available after hide=true filtering.",
                 "UNS-TGT-001",

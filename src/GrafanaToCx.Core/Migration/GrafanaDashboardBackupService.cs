@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text;
 using GrafanaToCx.Core.ApiClient;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -8,6 +9,7 @@ namespace GrafanaToCx.Core.Migration;
 
 public sealed class GrafanaDashboardBackupService
 {
+    private const string ManifestEntryName = "_manifest.json";
     private static readonly char[] InvalidPathChars = Path.GetInvalidFileNameChars();
 
     private readonly IGrafanaClient _grafanaClient;
@@ -21,7 +23,7 @@ public sealed class GrafanaDashboardBackupService
         _logger = logger;
     }
 
-    public async Task BackupAsync(
+    public async Task<GrafanaDashboardBackupResult> BackupAsync(
         IReadOnlyList<GrafanaFolder> folders,
         string backupFilePath,
         CancellationToken ct = default)
@@ -32,7 +34,10 @@ public sealed class GrafanaDashboardBackupService
 
         _logger.LogInformation("Starting Grafana dashboard backup to '{BackupFile}'.", backupFilePath);
 
-        int total = 0, failed = 0;
+        var discovered = 0;
+        var written = 0;
+        var failedDashboards = new List<string>();
+        var failedFolders = new List<string>();
 
         using var stream = new FileStream(backupFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: false);
@@ -46,15 +51,16 @@ public sealed class GrafanaDashboardBackupService
             {
                 dashboards = await _grafanaClient.GetDashboardsInFolderAsync(folder.Id, ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex,
                     "Backup: failed to list dashboards in folder '{Folder}'. Skipping folder.",
                     folder.Title);
-                failed++;
+                failedFolders.Add(folder.Title);
                 continue;
             }
 
+            discovered += dashboards.Count;
             var safeFolder = Sanitize(folder.Title);
 
             foreach (var dash in dashboards)
@@ -66,12 +72,12 @@ public sealed class GrafanaDashboardBackupService
                 {
                     json = await _grafanaClient.GetDashboardByUidAsync(dash.Uid, ct);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex,
                         "Backup: failed to fetch dashboard '{Title}' ({Uid}). Skipping.",
                         dash.Title, dash.Uid);
-                    failed++;
+                    failedDashboards.Add(dash.Uid);
                     continue;
                 }
 
@@ -80,7 +86,7 @@ public sealed class GrafanaDashboardBackupService
                     _logger.LogWarning(
                         "Backup: dashboard '{Title}' ({Uid}) returned empty response. Skipping.",
                         dash.Title, dash.Uid);
-                    failed++;
+                    failedDashboards.Add(dash.Uid);
                     continue;
                 }
 
@@ -91,14 +97,65 @@ public sealed class GrafanaDashboardBackupService
                 await using var writer = new StreamWriter(entryStream);
                 await writer.WriteAsync(json.ToString(Formatting.Indented));
 
-                total++;
+                written++;
                 _logger.LogDebug("Backup: saved '{Entry}'.", entryName);
             }
         }
 
-        _logger.LogInformation(
-            "Backup complete: {Total} dashboard(s) saved, {Failed} skipped. Archive: '{BackupFile}'.",
-            total, failed, backupFilePath);
+        // A zero-entry ZipArchive is a 22-byte stub some tools refuse to open. Drop a manifest in
+        // so an empty or partial backup is still readable and explains itself.
+        if (written == 0 || failedDashboards.Count > 0 || failedFolders.Count > 0)
+        {
+            var manifest = new BackupManifest
+            {
+                Expected = discovered,
+                Written = written,
+                FailedIds = [..failedDashboards],
+                FailedFolders = [..failedFolders],
+                Note = BuildNote(discovered, failedDashboards.Count, failedFolders.Count)
+            };
+
+            var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.SmallestSize);
+            await using (var manifestStream = manifestEntry.Open())
+            await using (var manifestWriter = new StreamWriter(manifestStream, Encoding.UTF8))
+            {
+                await manifestWriter.WriteAsync(JsonConvert.SerializeObject(manifest, Formatting.Indented));
+            }
+        }
+
+        var result = new GrafanaDashboardBackupResult(discovered, written, failedDashboards, failedFolders);
+
+        if (result.Success)
+        {
+            _logger.LogInformation(
+                "Backup complete: {Written}/{Expected} dashboard(s) saved. Archive: '{BackupFile}'.",
+                written, discovered, backupFilePath);
+        }
+        else
+        {
+            _logger.LogError(
+                "Backup incomplete: {Written}/{Expected} saved, {FailedDashboards} dashboard(s) and {FailedFolders} folder(s) skipped. Archive: '{BackupFile}'.",
+                written, discovered, failedDashboards.Count, failedFolders.Count, backupFilePath);
+        }
+
+        return result;
+    }
+
+    private static string? BuildNote(int discovered, int failedDashboards, int failedFolders)
+    {
+        if (failedFolders > 0 || failedDashboards > 0)
+            return $"Backup incomplete: {failedDashboards} dashboard(s) and {failedFolders} folder(s) could not be read.";
+
+        return discovered == 0 ? "No dashboards found in the selected folders." : null;
+    }
+
+    private sealed class BackupManifest
+    {
+        public int Expected { get; set; }
+        public int Written { get; set; }
+        public IReadOnlyList<string> FailedIds { get; set; } = [];
+        public IReadOnlyList<string> FailedFolders { get; set; } = [];
+        public string? Note { get; set; }
     }
 
     private static string Sanitize(string name)

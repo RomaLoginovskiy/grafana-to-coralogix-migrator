@@ -233,6 +233,7 @@ public sealed class MigrationOrchestratorOverwriteTests
         }
 
         public IReadOnlyList<PanelConversionDiagnostic> ConversionDiagnostics => [];
+        public IReadOnlyList<DashboardConversionDiagnostic> DashboardDiagnostics => [];
         public IReadOnlyList<JObject> ConversionDecisionEvents => [];
     }
 

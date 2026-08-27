@@ -47,7 +47,8 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
             return BuildSkipPlan(
                 visibleTargets,
                 "DGR-LMG-001",
-                "Multi-Lucene merge skipped: widget type is not allowlisted.");
+                "Multi-Lucene merge skipped: widget type is not allowlisted.",
+                isTimeSeries);
         }
 
         if (!visibleTargets.All(IsElasticsearchTarget))
@@ -55,7 +56,8 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
             return BuildSkipPlan(
                 visibleTargets,
                 "DGR-LMG-002",
-                "Multi-Lucene merge skipped: visible targets are not all Elasticsearch/OpenSearch queries.");
+                "Multi-Lucene merge skipped: visible targets are not all Elasticsearch/OpenSearch queries.",
+                isTimeSeries);
         }
 
         var parsedPredicates = new List<IReadOnlyList<LucenePredicate>>(visibleTargets.Count);
@@ -66,7 +68,8 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
                 return BuildSkipPlan(
                     visibleTargets,
                     "DGR-LMG-003",
-                    "Multi-Lucene merge skipped: at least one Lucene target failed strict predicate parsing.");
+                    "Multi-Lucene merge skipped: at least one Lucene target failed strict predicate parsing.",
+                    isTimeSeries);
             }
 
             parsedPredicates.Add(predicates);
@@ -77,17 +80,18 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
             return BuildSkipPlan(
                 visibleTargets,
                 "DGR-LMG-004",
-                "Multi-Lucene merge skipped: targets do not differ by exactly one predicate on the same field/operator.");
+                "Multi-Lucene merge skipped: targets do not differ by exactly one predicate on the same field/operator.",
+                isTimeSeries);
         }
 
         if (!TryResolveAggregation(visibleTargets, out var aggregation, out var aggregationCode, out var aggregationReason))
-            return BuildSkipPlan(visibleTargets, aggregationCode, aggregationReason);
+            return BuildSkipPlan(visibleTargets, aggregationCode, aggregationReason, isTimeSeries);
 
         if (!TryResolveDateHistogram(visibleTargets, out var histogram, out var histogramCode, out var histogramReason))
-            return BuildSkipPlan(visibleTargets, histogramCode, histogramReason);
+            return BuildSkipPlan(visibleTargets, histogramCode, histogramReason, isTimeSeries);
 
         if (!TryResolveGroupByField(visibleTargets, varyingPredicates, out var groupByField, out var groupByCode, out var groupByReason))
-            return BuildSkipPlan(visibleTargets, groupByCode, groupByReason);
+            return BuildSkipPlan(visibleTargets, groupByCode, groupByReason, isTimeSeries);
 
         var baseFilter = string.Join(
             " AND ",
@@ -191,11 +195,21 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
         return true;
     }
 
+    /// <summary>
+    /// Abandons the merge. A pie chart carries a single query, so the only thing it can do is
+    /// keep one target and drop the rest. A line chart carries a queryDefinitions array, so a
+    /// skipped merge costs it nothing — every target is retained as its own series, which is
+    /// also closer to what the Grafana panel showed than a merged query would have been.
+    /// </summary>
     private static TransformationPlan.Success BuildSkipPlan(
         IReadOnlyList<JObject> visibleTargets,
         string code,
-        string reason)
+        string reason,
+        bool retainAllTargets = false)
     {
+        if (retainAllTargets)
+            return new TransformationPlan.Success(SelectedTargets: visibleTargets);
+
         var selected = visibleTargets.Count > 0
             ? new List<JObject> { visibleTargets[0] }
             : new List<JObject>();

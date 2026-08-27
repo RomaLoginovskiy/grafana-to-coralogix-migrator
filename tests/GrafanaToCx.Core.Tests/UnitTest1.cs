@@ -9,7 +9,7 @@ namespace GrafanaToCx.Core.Tests;
 public class UnitTest1
 {
     [Fact]
-    public void UnsupportedType_IsSoftSkipped_ByDefault()
+    public void UnsupportedType_LeavesNotMigratedPlaceholder_ByDefault()
     {
         var converter = CreateConverter();
 
@@ -29,7 +29,9 @@ public class UnitTest1
                 }
             }));
 
-        Assert.Empty(ExtractWidgets(result));
+        // The panel is still skipped, but a data panel leaves a marker so the gap is visible.
+        var widget = Assert.Single(ExtractWidgets(result));
+        Assert.Contains("Not migrated", widget["definition"]?["markdown"]?["markdownText"]?.ToString());
         Assert.Contains(
             converter.ConversionDiagnostics,
             d => d.PanelType == "flant-statusmap-panel" && d.Outcome == "skipped");

@@ -44,9 +44,16 @@ public sealed class PieChartPanelConverter : IPanelConverter
         }
         else
         {
-            pieQuery = IsElasticsearchTarget(target)
+            var built = IsElasticsearchTarget(target)
                 ? BuildLogsQuery(target)
-                : BuildMetricsQuery(panel, targets, discoveredMetrics);
+                : BuildMetricsQuery(panel, target, discoveredMetrics);
+
+            // An ungrouped metrics query cannot make a pie chart; let the converter skip the
+            // panel and report it rather than emitting something the API will reject.
+            if (built is null)
+                return null;
+
+            pieQuery = built;
         }
 
         return new JObject
@@ -114,16 +121,7 @@ public sealed class PieChartPanelConverter : IPanelConverter
         return new JObject { ["logs"] = logsQuery };
     }
 
-    /// <summary>
-    /// Builds the metrics branch, guaranteeing a non-empty <c>groupNames</c>.
-    /// </summary>
-    /// <remarks>
-    /// A Coralogix pie slices by label values, and the API rejects the widget outright with
-    /// <c>group_names cannot be empty</c> when none are supplied. Grafana records the intended grouping in
-    /// three different places, so all three are consulted; when the panel expresses its slices as separate
-    /// scalar queries instead, the queries are consolidated under a synthesized label.
-    /// </remarks>
-    private JObject BuildMetricsQuery(JObject panel, IReadOnlyList<JObject> targets, ISet<string> discoveredMetrics)
+    private static JObject? BuildMetricsQuery(JObject panel, JObject target, ISet<string> discoveredMetrics)
     {
         var series = targets
             .Select(t => new PromqlSeriesTarget(
@@ -186,13 +184,51 @@ public sealed class PieChartPanelConverter : IPanelConverter
             ["filters"] = new JArray()
         };
 
-        if (groupNames.Count > 0)
-            metricsQuery["groupNames"] = new JArray(groupNames.Cast<object>().ToArray());
+        // Coralogix rejects a metrics pie chart with empty group_names, so fall back to the
+        // PromQL grouping clause when the legend format does not name a label.
+        var groupNames = new JArray();
+        if (!string.IsNullOrWhiteSpace(groupName))
+            groupNames.Add(groupName);
+        else
+            foreach (var label in ExtractPromqlGroupingLabels(promql))
+                groupNames.Add(label);
+
+        // No grouping anywhere means a single scalar — one slice, which Coralogix rejects
+        // outright. Signal that upward rather than emitting a widget that fails validation
+        // and takes the whole dashboard down with it.
+        if (groupNames.Count == 0)
+            return null;
+
+        metricsQuery["groupNames"] = groupNames;
 
         return new JObject { ["metrics"] = metricsQuery };
     }
 
-    private void ReportConsolidation(JObject panel, PromqlConsolidationResult consolidated)
+    /// <summary>
+    /// Labels from a PromQL grouping clause — both <c>sum(...) by (a, b)</c> and
+    /// <c>sum by (a, b) (...)</c>. <c>without</c> is not usable here: it names the labels to
+    /// drop rather than the ones to group by.
+    /// </summary>
+    public static IReadOnlyList<string> ExtractPromqlGroupingLabels(string promql)
+    {
+        if (string.IsNullOrWhiteSpace(promql))
+            return [];
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            promql,
+            @"\bby\s*\(\s*(?<labels>[^)]*?)\s*\)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        if (!match.Success)
+            return [];
+
+        return match.Groups["labels"].Value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(label => label.Length > 0)
+            .ToList();
+    }
+
+    private static string? InferMetricsGroupNameFromDisplayName(JObject panel)
     {
         if (_diagnosticSink is null || consolidated.SeriesCount < 2)
             return;

@@ -10,7 +10,13 @@ public sealed class TransformationContext
     public JObject Panel { get; }
     public JArray Targets { get; }
     public JArray Transformations { get; }
+
+    /// <summary>Canonical panel type; legacy identifiers are normalised so planners match on one name.</summary>
     public string PanelType { get; }
+
+    /// <summary>The type as Grafana wrote it, for diagnostics.</summary>
+    public string RawPanelType { get; }
+
     public string PanelTitle { get; }
 
     public TransformationContext(JObject panel, JArray targets, JArray transformations)
@@ -18,7 +24,8 @@ public sealed class TransformationContext
         Panel = panel;
         Targets = targets;
         Transformations = transformations;
-        PanelType = panel.Value<string>("type") ?? string.Empty;
+        RawPanelType = panel.Value<string>("type") ?? string.Empty;
+        PanelType = PanelTypes.Normalize(RawPanelType);
         PanelTitle = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}";
     }
 

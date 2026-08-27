@@ -660,7 +660,7 @@ public class TransformationPlannerTests
     }
 
     [Fact]
-    public void TimeSeries_Allowlisted_DateHistogramMismatch_SkipsMergeWithDeterministicDiagnostic()
+    public void TimeSeries_Allowlisted_DateHistogramMismatch_SkipsMergeButKeepsEveryTarget()
     {
         var converter = CreateConverter("timeseries");
         var panel = new JObject
@@ -711,16 +711,24 @@ public class TransformationPlannerTests
         var widget = GetFirstWidget(result);
         Assert.NotNull(widget);
 
+        // The merge is still skipped — the intervals cannot be reconciled into one DataPrime
+        // query — but a lineChart holds a queryDefinitions array, so both targets are kept
+        // as separate series rather than one being discarded.
         var queryDefinitions = widget["definition"]?["lineChart"]?["queryDefinitions"] as JArray;
         Assert.NotNull(queryDefinitions);
-        Assert.Single(queryDefinitions!);
+        Assert.Equal(2, queryDefinitions!.Count);
 
-        var query = queryDefinitions[0]?["query"] as JObject;
-        Assert.NotNull(query);
-        Assert.NotNull(query!["logs"]);
-        Assert.Null(query["dataprime"]);
+        foreach (var definition in queryDefinitions.Children<JObject>())
+        {
+            var query = definition["query"] as JObject;
+            Assert.NotNull(query);
+            Assert.NotNull(query!["logs"]);
+            Assert.Null(query["dataprime"]);
+        }
 
-        Assert.Contains(converter.ConversionDiagnostics, d => d.PanelTitle == "Histogram Mismatch" && d.Code == "DGR-LMG-009");
+        // Nothing was dropped, so no degradation is reported.
+        Assert.DoesNotContain(converter.ConversionDiagnostics,
+            d => d.PanelTitle == "Histogram Mismatch" && d.Code == "DGR-LMG-009");
     }
 
     [Fact]
