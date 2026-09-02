@@ -8,12 +8,35 @@ namespace GrafanaToCx.Core.Converter.PanelConverters;
 
 public sealed class LineChartPanelConverter : IPanelConverter
 {
+    private const string LegendCalcDiagnosticCode = "DGR-LGD-001";
+
     private readonly ILogqlToLuceneTranslator _logqlTranslator;
+    private readonly Action<PanelConversionDiagnostic>? _diagnosticSink;
     private static readonly IAggregationMapper AggregationMapper = new AggregationMapper();
 
-    public LineChartPanelConverter(ILogqlToLuceneTranslator? logqlTranslator = null)
+    /// <summary>
+    /// Grafana legend calculations that Coralogix can render, keyed to their
+    /// <c>LegendColumn</c> enum member. Anything absent here has no equivalent and is reported
+    /// rather than substituted — showing the wrong statistic silently is worse than omitting it.
+    /// </summary>
+    private static readonly Dictionary<string, string> LegendColumnMapping =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["mean"] = "LEGEND_COLUMN_AVG",
+            ["avg"] = "LEGEND_COLUMN_AVG",
+            ["min"] = "LEGEND_COLUMN_MIN",
+            ["max"] = "LEGEND_COLUMN_MAX",
+            ["sum"] = "LEGEND_COLUMN_SUM",
+            ["last"] = "LEGEND_COLUMN_LAST",
+            ["lastNotNull"] = "LEGEND_COLUMN_LAST"
+        };
+
+    public LineChartPanelConverter(
+        ILogqlToLuceneTranslator? logqlTranslator = null,
+        Action<PanelConversionDiagnostic>? diagnosticSink = null)
     {
         _logqlTranslator = logqlTranslator ?? new LogqlToLuceneTranslator();
+        _diagnosticSink = diagnosticSink;
     }
 
     // PromQL always has a metric name immediately before {. LogQL never does.
@@ -128,8 +151,8 @@ public sealed class LineChartPanelConverter : IPanelConverter
         return new JObject
         {
             ["id"] = WidgetHelpers.IdObject(),
-            ["title"] = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}",
-            ["description"] = QueryHelpers.CleanHtml(panel.Value<string>("description") ?? string.Empty),
+            ["title"] = WidgetHelpers.ResolveTitle(panel),
+            ["description"] = WidgetHelpers.ResolveDescription(panel),
             ["definition"] = new JObject
             {
                 ["lineChart"] = new JObject
@@ -137,7 +160,7 @@ public sealed class LineChartPanelConverter : IPanelConverter
                     ["legend"] = new JObject
                     {
                         ["isVisible"] = legendOptions.Value<bool?>("showLegend") ?? true,
-                        ["columns"] = GetLegendColumns(legendOptions),
+                        ["columns"] = GetLegendColumns(legendOptions, panel),
                         ["groupByQuery"] = true,
                         ["placement"] = placement
                     },
@@ -214,27 +237,30 @@ public sealed class LineChartPanelConverter : IPanelConverter
         return QueryHelpers.DeriveSeriesNameFromQuery(query, refId);
     }
 
-    private static JArray GetLegendColumns(JObject legendOptions)
+    private JArray GetLegendColumns(JObject legendOptions, JObject panel)
     {
         var calcs = legendOptions["calcs"] as JArray ?? new JArray();
-        var mapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["mean"] = "LEGEND_COLUMN_AVG",
-            ["avg"] = "LEGEND_COLUMN_AVG",
-            ["min"] = "LEGEND_COLUMN_MIN",
-            ["max"] = "LEGEND_COLUMN_MAX",
-            ["sum"] = "LEGEND_COLUMN_SUM",
-            ["last"] = "LEGEND_COLUMN_LAST",
-            ["first"] = "LEGEND_COLUMN_FIRST"
-        };
 
         var result = new JArray();
         foreach (var calc in calcs.Select(c => c.ToString()))
         {
-            if (mapping.TryGetValue(calc, out var mapped))
+            if (LegendColumnMapping.TryGetValue(calc, out var mapped))
             {
-                result.Add(mapped);
+                if (!result.Any(existing => string.Equals(existing.ToString(), mapped, StringComparison.Ordinal)))
+                {
+                    result.Add(mapped);
+                }
+
+                continue;
             }
+
+            _diagnosticSink?.Invoke(new PanelConversionDiagnostic(
+                panel.Value<string>("title") ?? string.Empty,
+                panel.Value<string>("type") ?? "timeseries",
+                "dropped",
+                $"Legend calculation '{calc}' has no Coralogix legend column and was omitted. "
+                + "The chart still renders; only this legend statistic is missing.",
+                LegendCalcDiagnosticCode));
         }
 
         return result;
@@ -246,7 +272,7 @@ public sealed class LineChartPanelConverter : IPanelConverter
     /// </summary>
     private static bool IsLokiQuery(JObject target, string expr)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("loki", StringComparison.OrdinalIgnoreCase) == true) return true;
         if (dsType?.Equals("prometheus", StringComparison.OrdinalIgnoreCase) == true) return false;
 
@@ -296,7 +322,7 @@ public sealed class LineChartPanelConverter : IPanelConverter
 
     private static bool IsElasticsearchQuery(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("elasticsearch", StringComparison.OrdinalIgnoreCase) == true ||
             dsType?.Equals("opensearch", StringComparison.OrdinalIgnoreCase) == true)
             return true;

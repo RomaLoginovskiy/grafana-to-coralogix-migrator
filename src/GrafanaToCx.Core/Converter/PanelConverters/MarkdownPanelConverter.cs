@@ -26,7 +26,7 @@ public sealed class MarkdownPanelConverter : IPanelConverter
             {
                 ["markdown"] = new JObject
                 {
-                    ["markdownText"] = QueryHelpers.CleanHtml(content)
+                    ["markdownText"] = QueryHelpers.NormalizeNamePlaceholders(QueryHelpers.CleanHtml(content))
                 }
             }
         };

@@ -32,13 +32,16 @@ public sealed class CommandHandlers
 
     // ── Convert ───────────────────────────────────────────────────────────────
 
-    public async Task<int> RunConvertAsync(string input, string? output)
+    public async Task<int> RunConvertAsync(string input, string? output, bool fanOutMultiQueryPanels = true)
     {
         var converter = CreateConverter();
+        // Built here rather than left null: Convert(json) with no options takes every default from
+        // ConversionOptions, so this path silently ignored anything the operator configured.
+        var options = new ConversionOptions { FanOutMultiQueryPanels = fanOutMultiQueryPanels };
 
         if (Directory.Exists(input))
         {
-            await BatchConvertAsync(converter, input, output ?? "./converted");
+            await BatchConvertAsync(converter, input, output ?? "./converted", options);
             return 0;
         }
 
@@ -52,22 +55,24 @@ public sealed class CommandHandlers
             Path.GetDirectoryName(input) ?? ".",
             Path.GetFileNameWithoutExtension(input) + "_cx.json");
 
-        await ConvertFileAsync(converter, input, outputPath);
+        await ConvertFileAsync(converter, input, outputPath, options);
         return 0;
     }
 
-    private static async Task ConvertFileAsync(IGrafanaToCxConverter converter, string inputPath, string outputPath)
+    private static async Task ConvertFileAsync(
+        IGrafanaToCxConverter converter, string inputPath, string outputPath, ConversionOptions options)
     {
         try
         {
             var json = await File.ReadAllTextAsync(inputPath);
-            var result = converter.Convert(json);
+            var result = converter.Convert(json, options);
             var dir = Path.GetDirectoryName(outputPath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
             await File.WriteAllTextAsync(outputPath, result);
             Console.WriteLine($"Converted: {inputPath} -> {outputPath}");
+            WarnAboutDroppedQueries(converter);
         }
         catch (Exception ex)
         {
@@ -75,7 +80,39 @@ public sealed class CommandHandlers
         }
     }
 
-    private static async Task BatchConvertAsync(IGrafanaToCxConverter converter, string inputDir, string outputDir)
+    /// <summary>
+    /// Prints a line per widget that kept only some of its panel's queries.
+    /// </summary>
+    /// <remarks>
+    /// <c>convert</c> and <c>push</c> write no report, so the converter's <c>select-one</c>
+    /// diagnostics had no consumer at all on those paths and the loss was genuinely invisible —
+    /// unlike <c>migrate</c> and <c>import</c>, which render them into the run report.
+    /// </remarks>
+    private static void WarnAboutDroppedQueries(IGrafanaToCxConverter converter)
+    {
+        var reduced = converter.ConversionDiagnostics
+            .Where(d => string.Equals(d.Approximation, "select-one", StringComparison.Ordinal))
+            .ToList();
+
+        if (reduced.Count == 0)
+            return;
+
+        var droppedCount = reduced.Sum(d => d.DroppedSemantics?.Count ?? 0);
+        Console.WriteLine(
+            $"  warning: {droppedCount} quer{(droppedCount == 1 ? "y" : "ies")} dropped across "
+            + $"{reduced.Count} widget(s) — the Coralogix widget holds one query:");
+
+        foreach (var diagnostic in reduced)
+        {
+            var dropped = diagnostic.DroppedSemantics is { Count: > 0 } list
+                ? string.Join(", ", list)
+                : "unnamed target(s)";
+            Console.WriteLine($"    - {diagnostic.PanelTitle} ({diagnostic.PanelType}): kept one, dropped {dropped}");
+        }
+    }
+
+    private static async Task BatchConvertAsync(
+        IGrafanaToCxConverter converter, string inputDir, string outputDir, ConversionOptions options)
     {
         Directory.CreateDirectory(outputDir);
         var files = Directory.GetFiles(inputDir, "*.json", SearchOption.AllDirectories);
@@ -89,7 +126,7 @@ public sealed class CommandHandlers
         foreach (var file in files)
         {
             var outputFile = Path.Combine(outputDir, Path.GetFileName(file));
-            await ConvertFileAsync(converter, file, outputFile);
+            await ConvertFileAsync(converter, file, outputFile, options);
         }
     }
 
@@ -1361,7 +1398,7 @@ public sealed class CommandHandlers
 
     // ── Push ──────────────────────────────────────────────────────────────────
 
-    public async Task<int> RunPushAsync(string input, string endpoint, string apiKey, string? folderId, string? folderName, string? nameOverride, bool interactive = false)
+    public async Task<int> RunPushAsync(string input, string endpoint, string apiKey, string? folderId, string? folderName, string? nameOverride, bool interactive = false, bool fanOutMultiQueryPanels = true)
     {
         if (!File.Exists(input))
         {
@@ -1402,8 +1439,13 @@ public sealed class CommandHandlers
         try
         {
             var json = await File.ReadAllTextAsync(input);
-            var options = new ConversionOptions { FolderId = folderId };
+            var options = new ConversionOptions
+            {
+                FolderId = folderId,
+                FanOutMultiQueryPanels = fanOutMultiQueryPanels
+            };
             var dashboard = converter.ConvertToJObject(json, options);
+            WarnAboutDroppedQueries(converter);
 
             if (!string.IsNullOrWhiteSpace(nameOverride))
                 dashboard["name"] = nameOverride;

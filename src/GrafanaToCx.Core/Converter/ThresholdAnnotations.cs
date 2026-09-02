@@ -30,6 +30,9 @@ public static class ThresholdAnnotations
     /// </summary>
     private const string TransparentColor = "transparent";
 
+    /// <summary>Coralogix limit on an annotation name.</summary>
+    private const int MaxAnnotationNameLength = 100;
+
     /// <summary>
     /// Builds one annotation per threshold step the panel defines.
     ///
@@ -58,13 +61,36 @@ public static class ThresholdAnnotations
                 continue;
 
             annotations.Add(BuildAnnotation(
-                $"{panelTitle} threshold {value.ToString(Newtonsoft.Json.Formatting.None)}",
+                BuildAnnotationName(panelTitle, value.ToString(Newtonsoft.Json.Formatting.None)),
                 Convert.ToDouble(value.Value),
                 MapColor(color),
                 widgetId));
         }
 
         return annotations;
+    }
+
+    /// <summary>
+    /// Coralogix rejects an annotation name longer than 100 characters. Only the panel-title
+    /// portion is shortened: the trailing " threshold &lt;value&gt;" is what tells apart the several
+    /// annotations one panel emits — one per threshold step — so trimming the tail instead would
+    /// collapse them into a single repeated name.
+    /// </summary>
+    private static string BuildAnnotationName(string panelTitle, string value)
+    {
+        const string ellipsis = "\u2026";
+        var suffix = $" threshold {value}";
+        var name = panelTitle + suffix;
+
+        if (name.Length <= MaxAnnotationNameLength)
+            return name;
+
+        var room = MaxAnnotationNameLength - suffix.Length - ellipsis.Length;
+
+        // A suffix that alone fills the budget leaves no title to preserve; keep it legal and move on.
+        return room <= 0
+            ? name[..MaxAnnotationNameLength]
+            : string.Concat(panelTitle.AsSpan(0, room), ellipsis, suffix);
     }
 
     private static JObject BuildAnnotation(string name, double value, string color, string widgetId) => new()

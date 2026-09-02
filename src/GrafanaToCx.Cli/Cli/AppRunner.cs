@@ -302,7 +302,8 @@ public static class AppRunner
             Console.Error.WriteLine("Error: convert requires an input file or directory.");
             return 1;
         }
-        return await handlers.RunConvertAsync(input, parsed.Get("output"));
+        return await handlers.RunConvertAsync(
+            input, parsed.Get("output"), fanOutMultiQueryPanels: !parsed.GetBool("no-fan-out"));
     }
 
     /// <remarks>

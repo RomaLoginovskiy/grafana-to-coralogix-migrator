@@ -26,11 +26,17 @@ public interface IDashboardTransformer
 /// Source uids claimed by more than one file in this run. Members must not preserve their uid, or two
 /// files would publish over each other.
 /// </param>
+/// <param name="FanOutMultiQueryPanels">
+/// Passed through to the target's conversion options. Without it on the context there is no route
+/// from the settings file to the converter on this path, so the setting reads as configured and has
+/// no effect. Defaults to true to match <see cref="Converter.ConversionOptions"/>.
+/// </param>
 public sealed record DashboardTransformContext(
     string RelativePath,
     string? FolderId,
     string? DashboardNameOverride,
-    IReadOnlySet<string>? ContestedSourceUids = null);
+    IReadOnlySet<string>? ContestedSourceUids = null,
+    bool FanOutMultiQueryPanels = true);
 
 /// <param name="StableId">An identifier the target matches on, carried inside the payload (Grafana uid). Null for Coralogix.</param>
 /// <param name="Diagnostics">

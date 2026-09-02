@@ -48,13 +48,18 @@ public class StatFanOutTests
         Target("D", "Rejected by 3C"),
         Target("E", "Warning"));
 
+    /// <remarks>
+    /// Passes no options at all, which is the case that matters: <c>convert</c> and the interactive
+    /// menu reach the converter that way, and a null options argument used to mean "false" for
+    /// every bool regardless of the property's default. Asserting through the no-options overload
+    /// is what makes this test able to catch that.
+    /// </remarks>
     [Fact]
-    public void Disabled_ByDefault_KeepsOneWidget()
+    public void EnabledByDefault_EmitsOneWidgetPerQuery()
     {
         var converter = new GrafanaToCxConverter(NullLogger<GrafanaToCxConverter>.Instance);
         var dashboard = new JObject { ["title"] = "Board", ["panels"] = new JArray(FiveQueryStat()) };
 
-        // No options at all — the default must not change existing behaviour.
         var result = converter.ConvertToJObject(dashboard.ToString());
 
         var widgets = (result["layout"]?["sections"] as JArray ?? [])
@@ -63,8 +68,16 @@ public class StatFanOutTests
             .SelectMany(r => (r["widgets"] as JArray ?? []).Children<JObject>())
             .ToList();
 
-        Assert.Single(widgets);
-        Assert.Equal("Cluster A", widgets[0].Value<string>("title"));
+        Assert.Equal(5, widgets.Count);
+        Assert.Equal(
+            [
+                "Cluster A — Total request",
+                "Cluster A — Accepted",
+                "Cluster A — Rejected by bank",
+                "Cluster A — Rejected by 3C",
+                "Cluster A — Warning"
+            ],
+            widgets.Select(w => w.Value<string>("title")).ToList());
     }
 
     [Fact]

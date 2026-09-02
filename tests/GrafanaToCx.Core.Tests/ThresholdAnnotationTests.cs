@@ -126,4 +126,57 @@ public class ThresholdAnnotationTests
     {
         Assert.Equal(expected, ThresholdAnnotations.MapColor(grafana));
     }
+
+    // ── the 100-character name cap ───────────────────────────────────────────
+
+    private static JArray ConvertTitled(string title, params (string Color, object? Value)[] steps)
+    {
+        var panel = Panel("absolute", steps);
+        panel["title"] = title;
+        return Convert(panel);
+    }
+
+    /// <summary>
+    /// Coralogix rejects an annotation name over 100 characters, which took down whole dashboards
+    /// whose line charts had long titles.
+    /// </summary>
+    [Fact]
+    public void ALongPanelTitle_IsTrimmedToTheNameLimit()
+    {
+        var title = new string('x', 140);
+
+        var annotations = ConvertTitled(title, ("red", 90));
+
+        var name = Assert.Single(annotations).Value<string>("name");
+        Assert.NotNull(name);
+        Assert.True(name!.Length <= 100, $"name was {name.Length} characters");
+    }
+
+    /// <summary>
+    /// The value must survive the trim: it is the only thing telling apart the several annotations
+    /// one panel emits, so shortening the tail would collapse them into one repeated name.
+    /// </summary>
+    [Fact]
+    public void TrimmingKeepsTheThresholdValue_SoSiblingsStayDistinct()
+    {
+        var title = new string('x', 140);
+
+        var annotations = ConvertTitled(title, ("red", 90), ("orange", 75));
+
+        var names = annotations.Children<JObject>().Select(a => a.Value<string>("name")!).ToList();
+
+        Assert.Equal(2, names.Count);
+        Assert.All(names, n => Assert.True(n.Length <= 100, $"name was {n.Length} characters"));
+        Assert.Contains(names, n => n.EndsWith("threshold 90", StringComparison.Ordinal));
+        Assert.Contains(names, n => n.EndsWith("threshold 75", StringComparison.Ordinal));
+        Assert.Equal(names.Count, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void AShortPanelTitle_IsLeftAlone()
+    {
+        var name = Assert.Single(ConvertTitled("CPU", ("red", 90))).Value<string>("name");
+
+        Assert.Equal("CPU threshold 90", name);
+    }
 }

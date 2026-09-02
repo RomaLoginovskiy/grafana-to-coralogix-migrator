@@ -683,7 +683,7 @@ public sealed class PieMultiQueryConsolidationPlanner : ITransformationPlanner
 
     private static bool IsElasticsearchTarget(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("elasticsearch", StringComparison.OrdinalIgnoreCase) == true ||
             dsType?.Equals("opensearch", StringComparison.OrdinalIgnoreCase) == true)
             return true;

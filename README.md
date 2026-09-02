@@ -511,6 +511,7 @@ Full settings file with all available fields:
     "checkpointFile": "migration-checkpoint.json",
     "reportFile": "migration-report.txt",
     "backupFile": "grafana-backup.zip",
+    "fanOutMultiQueryPanels": true,
     "maxRetries": 5,
     "initialRetryDelaySeconds": 2
   }
@@ -531,19 +532,31 @@ Full settings file with all available fields:
 | `migration.checkpointFile` | Checkpoint file path for resume |
 | `migration.reportFile` | Human-readable migration report path |
 | `migration.backupFile` | Grafana backup ZIP path, used by `backup` and by `migrate`'s pre-flight backup. Empty disables the pre-flight backup; `backup` then falls back to `grafana-backup.zip` |
+| `migration.fanOutMultiQueryPanels` | Emit one widget per query for multi-query `stat` panels instead of keeping the first (default `true` — see below) |
 | `migration.maxRetries` | Max retries per dashboard |
 | `migration.initialRetryDelaySeconds` | Initial exponential backoff delay |
 
 ### `migration.fanOutMultiQueryPanels`
 
-A Coralogix gauge carries a single query, so a Grafana `stat` panel with several queries keeps
-the first and drops the rest. Grafana draws one tile per query on such a panel, so setting this
-to `true` emits one widget per query — recovering the data, titled from each target's `alias`.
+A Coralogix gauge carries a single query, so a Grafana `stat` panel with several queries would
+keep the first and drop the rest. Grafana draws one tile per query on such a panel, so this emits
+one widget per query — preserving the data, titled from each target's `alias`.
 
-Off by default because it changes layout: a five-query stat panel becomes five widgets. On
-dashboards built around the idiom (status breakdowns, wall displays) this can multiply the
-widget count several times over. Turn it on when completeness matters more than fidelity to the
-original layout.
+**On by default.** It changes layout — a five-query stat panel becomes five widgets, which on
+dashboards built around the idiom (status breakdowns, wall displays) can multiply the widget
+count several times over. That is still the better default, because the alternative loses data
+outright, and extra widgets are visible and easy to delete while a missing query is neither.
+
+Set it to `false` to keep the original single-widget layout and accept the loss. On `convert`,
+which reads no settings file, pass `--no-fan-out` instead:
+
+```bash
+dotnet run --project src/GrafanaToCx.Cli -- convert dashboard.json --no-fan-out
+```
+
+Whenever a query *is* dropped — with fan-out off, or on a panel type that cannot fan out —
+`convert` and `push` print which widget lost which targets, and `migrate` and `import` record it
+in the run report.
 
 Only `stat` and `singlestat` fan out. `table` panels join their queries via a transformation,
 `piechart` queries are slices of one chart, and `bargauge` queries are buckets of one

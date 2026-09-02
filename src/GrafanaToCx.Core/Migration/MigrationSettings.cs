@@ -75,9 +75,14 @@ public sealed class MigrationRunSettings
     /// <summary>
     /// When true, a stat panel with several queries becomes one widget per query rather than
     /// keeping the first and dropping the rest. Preserves the data; adds widgets and so changes
-    /// the layout of dashboards built around the idiom. Off by default.
+    /// the layout of dashboards built around the idiom. On by default.
     /// </summary>
-    public bool FanOutMultiQueryPanels { get; init; }
+    /// <remarks>
+    /// The initialiser is required, not decorative: this is bound from a settings file that
+    /// usually omits the key, and a bare <c>init</c> bool would then deserialize to false and
+    /// silently restore the lossy behaviour.
+    /// </remarks>
+    public bool FanOutMultiQueryPanels { get; init; } = true;
 
     /// <summary>
     /// Optional cx CLI profile used for pre-upload validation. Needed when the account

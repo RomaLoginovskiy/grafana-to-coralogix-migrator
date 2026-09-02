@@ -52,8 +52,8 @@ public sealed class LogsPanelConverter : IPanelConverter
         return new JObject
         {
             ["id"] = WidgetHelpers.IdObject(),
-            ["title"] = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}",
-            ["description"] = QueryHelpers.CleanHtml(panel.Value<string>("description") ?? string.Empty),
+            ["title"] = WidgetHelpers.ResolveTitle(panel),
+            ["description"] = WidgetHelpers.ResolveDescription(panel),
             ["definition"] = new JObject
             {
                 ["dataTable"] = new JObject
@@ -76,7 +76,7 @@ public sealed class LogsPanelConverter : IPanelConverter
     private string ExtractLuceneQuery(JObject target)
     {
         // Elasticsearch / OpenSearch datasource: query field is already Lucene.
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("elasticsearch", StringComparison.OrdinalIgnoreCase) == true ||
             dsType?.Equals("opensearch", StringComparison.OrdinalIgnoreCase) == true)
         {
