@@ -166,7 +166,8 @@ public sealed class VariableConverter
         var current = varToken["current"] as JObject ?? new JObject();
         // A multi-select variable stores current.value/current.text as arrays, so read
         // them through ExtractSingleValue rather than casting the token to string.
-        var currentValue = ExtractSingleValue(current["value"]);
+        var currentValueToken = current["value"];
+        var currentValue = ExtractSingleValue(currentValueToken);
         var currentLabel = ExtractSingleValue(current["text"]);
         var useMulti = includeAll || multi
             || currentValueToken is JArray

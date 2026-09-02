@@ -28,6 +28,7 @@ public static class AppRunner
                 CommandKind.Interactive => await RunInteractiveFromArgs(handlers, parsed),
                 CommandKind.Convert => await RunConvertFromArgs(handlers, parsed),
                 CommandKind.Migrate => await RunMigrateFromArgs(handlers, parsed),
+                CommandKind.Assess => await RunAssessFromArgs(handlers, parsed),
                 CommandKind.Backup => await RunBackupFromArgs(handlers, parsed),
                 CommandKind.Verify => await RunVerifyFromArgs(handlers, parsed),
                 CommandKind.Import => await RunImportFromArgs(handlers, parsed),
@@ -327,6 +328,23 @@ public static class AppRunner
         }
 
         return await handlers.RunMigrateAsync(settings, interactive: false, cxEndpoint);
+    }
+
+    private static async Task<int> RunAssessFromArgs(CommandHandlers handlers, ParsedArgs parsed)
+    {
+        var input = parsed.Get("input");
+        if (string.IsNullOrEmpty(input))
+        {
+            Console.Error.WriteLine("Error: assess requires an input directory or backup .zip.");
+            return 1;
+        }
+
+        return await handlers.RunAssessAsync(
+            input,
+            parsed.Get("output"),
+            parsed.Get("profile"),
+            parsed.Get("region"),
+            parsed.Get("format"));
     }
 
     private static async Task<int> RunBackupFromArgs(CommandHandlers handlers, ParsedArgs parsed)
