@@ -1,7 +1,7 @@
 {
   "name": "grafana_to_cx_custom_converter",
   "version": "1.0.0",
-  "description": "A .NET 9 CLI tool that converts Grafana dashboards into Coralogix custom dashboard format.",
+  "description": "Open-source .NET CLI to migrate Grafana dashboards to Coralogix custom dashboards.",
   "main": "index.js",
   "directories": {
     "test": "tests"
@@ -14,16 +14,25 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RomaLoginovskiy/grafana_to_coralogix_dashboards_converter.git"
+    "url": "git+https://github.com/RomaLoginovskiy/grafana-to-coralogix-migrator.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "grafana",
+    "coralogix",
+    "dashboard-migration",
+    "observability",
+    "promql",
+    "logql",
+    "dotnet",
+    "cli"
+  ],
+  "author": "RomaLoginovskiy",
+  "license": "MIT",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/RomaLoginovskiy/grafana_to_coralogix_dashboards_converter/issues"
+    "url": "https://github.com/RomaLoginovskiy/grafana-to-coralogix-migrator/issues"
   },
-  "homepage": "https://github.com/RomaLoginovskiy/grafana_to_coralogix_dashboards_converter#readme",
+  "homepage": "https://github.com/RomaLoginovskiy/grafana-to-coralogix-migrator#readme",
   "devDependencies": {
     "@playwright/test": "^1.58.2"
   }

@@ -1,9 +1,26 @@
-# Grafana to Coralogix Custom Dashboard Converter
+# Grafana to Coralogix Dashboard Migration Tool
 
-A .NET 9 CLI tool that converts Grafana dashboards into Coralogix custom dashboard format.
+[![.NET 9](https://img.shields.io/badge/.NET-9-512BD4)](https://dotnet.microsoft.com/download/dotnet/9.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-It supports:
-- Pre-migration assessment of a set of boards (`assess`)
+Open-source .NET 9 CLI to **migrate Grafana dashboards to Coralogix custom dashboards** — bulk or
+single-file, with pre-migration assessment, checkpoint/resume, and round-trip validation.
+
+**Use when:** moving from Grafana Cloud or self-hosted Grafana to Coralogix native dashboards, or to
+Coralogix-hosted Grafana with `grafana-import`.
+
+```bash
+git clone https://github.com/RomaLoginovskiy/grafana-to-coralogix-migrator.git
+cd grafana-to-coralogix-migrator
+```
+
+| Migration goal | Commands |
+|---|---|
+| Native Coralogix custom dashboards | `migrate`, `convert`, `import`, `push` |
+| Keep Grafana UI on Coralogix | `grafana-import` |
+
+Capabilities:
+- [Pre-migration assessment](#pre-migration-assessment-assess) of a set of dashboards (`assess`)
 - Single-file conversion (`convert`)
 - Single-file conversion + upload (`push`)
 - Bulk migration from live Grafana (`migrate`)
@@ -17,6 +34,7 @@ It supports:
 
 ## Table of Contents
 
+- [Pre-Migration Assessment (`assess`)](#pre-migration-assessment-assess)
 - [Quick Start — Interactive Migration](#quick-start--interactive-migration)
 - [Step-by-Step Walkthrough](#step-by-step-walkthrough)
   - [Step 1 — Prerequisites](#step-1--prerequisites)
@@ -35,8 +53,35 @@ It supports:
 - [Supported Regions](#supported-regions)
 - [Environment Variables](#environment-variables)
 - [Other Commands](#other-commands)
+- [Integration Settings and Live Test](#integration-settings-and-live-test)
 - [Playwright Migration Validation](#playwright-migration-validation-grafana-vs-coralogix)
+- [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
+- [License and Related Links](#license-and-related-links)
+
+---
+
+## Pre-Migration Assessment (`assess`)
+
+Scan a directory of Grafana JSON exports or a backup ZIP before migration. `assess` converts each
+dashboard in memory, reports a per-dashboard `Clean`, `Degraded`, `Rejected`, or `Failed` verdict, and
+never uploads a dashboard. Live API validation requires the
+[`cx` CLI](https://github.com/coralogix/cx-cli) on `PATH` plus either `CX_API_KEY` or a configured
+`--profile`. Without the `cx` CLI, `assess` still runs conversion-only assessment.
+
+```bash
+CX_API_KEY="${CX_API_KEY:?Set CX_API_KEY before running assess}" \
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- \
+  assess ./grafana-backup.zip --format markdown --output report.md --region eu1
+```
+
+| Argument/Flag | Description |
+|---|---|
+| `<input>` | Directory containing dashboard JSON files, scanned recursively, or a backup `.zip` |
+| `-f`, `--format` | Report format: `text` or `markdown` (default: `text`) |
+| `-o`, `--output` | Write the report to a file as well as stdout |
+| `-p`, `--profile` | Optional configured `cx` CLI profile used for API validation |
+| `-r`, `--region` | Coralogix region used for API validation (default: `eu1`) |
 
 ---
 
@@ -62,9 +107,11 @@ This launches a fully guided terminal session — no flags to memorise. The tool
 
 ### Step 2 — Clone and configure
 
+Clone the migrator before working with a Grafana dashboard JSON export:
+
 ```bash
-git clone <your-repo-url>
-cd grafana_to_cx_custom_converter
+git clone https://github.com/RomaLoginovskiy/grafana-to-coralogix-migrator.git
+cd grafana-to-coralogix-migrator
 dotnet restore GrafanaToCx.sln
 ```
 
@@ -341,6 +388,9 @@ untrustworthy and continuing would republish or skip real dashboards.
 
 ## How It Works
 
+This migration tool supports observability platform migration workflows from Grafana Cloud,
+self-hosted Grafana, and Grafana dashboard JSON export backups.
+
 ```text
 Grafana Dashboard JSON
         │
@@ -400,8 +450,12 @@ The core conversion logic is in `src/GrafanaToCx.Core`, while `src/GrafanaToCx.C
 | Source | Conversion |
 |---|---|
 | PromQL | Passed through as-is |
-| LogQL | Converted to Lucene via `LogqlToLuceneConverter` |
+| Loki / LogQL | Converted to Lucene via `LogqlToLuceneConverter` |
 | Elasticsearch | Passed through as-is |
+
+Coralogix custom dashboards use destination-native query formats. This migrator preserves PromQL for
+metrics and converts Loki LogQL to Lucene for logs; Coralogix also supports DataPrime for native log and
+trace analysis, but the converter does not generate DataPrime expressions from source queries.
 
 ---
 
@@ -497,7 +551,7 @@ distribution — for those, one widget per query would be wrong.
 
 ### Pre-upload validation with the `cx` CLI
 
-If the [`cx` CLI](https://github.com/coralogix/cx) is on `PATH`, every converted dashboard is
+If the [`cx` CLI](https://github.com/coralogix/cx-cli) is on `PATH`, every converted dashboard is
 validated against the live Coralogix API **before** it is uploaded, using the read-only
 `dashboards check` endpoint. A dashboard the API would reject is failed with the reason in the
 migration report, instead of being sent and refused. Warnings are logged and do not block.
@@ -545,6 +599,7 @@ target fails, and each run prints the endpoint it resolved along with which of t
 |---|---|---|
 | `GRAFANA_API_KEY` | `migrate`, `backup` | First priority for Grafana API key (falls back to `credentials.grafanaApiKey`) |
 | `CX_API_KEY` | `migrate`, `verify` | First priority for Coralogix API key (falls back to `credentials.cxApiKey`) |
+| `CX_API_KEY` | `assess` | Required for live validation unless `--profile` supplies credentials; conversion-only assessment needs no API key |
 
 `backup` never contacts Coralogix, so it does not need `CX_API_KEY`.
 
@@ -1031,6 +1086,41 @@ Failure artifacts are written to `tests/e2e/artifacts/<dashboard-name>/`.
 
 ---
 
+## FAQ
+
+### What is the difference between Coralogix custom dashboards and Coralogix-hosted Grafana?
+
+Custom dashboards use Coralogix-native widgets and APIs; use `migrate`, `convert`, `import`, or `push`.
+Coralogix-hosted Grafana keeps the Grafana UI and dashboard model; use [`grafana-import`](#grafana-import).
+
+### Can I migrate PromQL, LogQL, or Elasticsearch queries?
+
+Yes. PromQL and Elasticsearch queries are preserved, while Loki LogQL is converted to Lucene. See
+[Supported Query Languages](#supported-query-languages) for DataPrime scope.
+
+### Do I need the Grafana API, or can I use exported JSON files?
+
+Grafana API access is optional. Use [`convert`](#convert) for local conversion, [`import`](#import) for
+bulk upload from JSON exports, or [`assess`](#pre-migration-assessment-assess) on an export directory or
+backup ZIP.
+
+### How do I resume a failed bulk migration?
+
+Re-run the same command and retain its checkpoint file; completed dashboards are skipped. See
+[Resuming a session](#resuming-a-session) and [`import`](#import) for checkpoint details.
+
+### Is this open source?
+
+Yes. The project is available under the [MIT License](LICENSE).
+
+### How do I validate migration quality?
+
+Run [`assess`](#pre-migration-assessment-assess) before migration, `verify` for conversion and round-trip
+comparison, and [Playwright migration validation](#playwright-migration-validation-grafana-vs-coralogix)
+for end-to-end UI and data checks.
+
+---
+
 ## Troubleshooting
 
 - `dotnet: command not found` — install .NET 9 SDK and restart terminal.
@@ -1039,3 +1129,14 @@ Failure artifacts are written to `tests/e2e/artifacts/<dashboard-name>/`.
 - Unexpected conversion output — run `verify` on the same input to compare round-trip behaviour.
 - Rate limits/timeouts — increase `maxRetries` and `initialRetryDelaySeconds` in `migration-settings.json`.
 - Migration stopped mid-run — re-run the same command; completed dashboards are skipped automatically via checkpoint.
+
+---
+
+## License and Related Links
+
+Licensed under the [MIT License](LICENSE).
+
+- [Coralogix Custom Dashboards documentation](https://coralogix.com/docs/user-guides/custom-dashboards/introduction/)
+- [Grafana dashboard JSON export documentation](https://grafana.com/docs/grafana/latest/visualizations/dashboards/share-dashboards-panels/#export-dashboards)
+- [Grafana Dashboard HTTP API](https://grafana.com/docs/grafana/latest/developers/http_api/dashboard/)
+- [`cx` CLI](https://github.com/coralogix/cx-cli)
