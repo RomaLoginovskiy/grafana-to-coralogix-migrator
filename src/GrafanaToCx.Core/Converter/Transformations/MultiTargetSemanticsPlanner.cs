@@ -78,7 +78,7 @@ public sealed class MultiTargetSemanticsPlanner : ITransformationPlanner
 
     private static string ResolveFamily(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (string.Equals(dsType, "prometheus", StringComparison.OrdinalIgnoreCase))
             return "metrics";
         if (string.Equals(dsType, "elasticsearch", StringComparison.OrdinalIgnoreCase) ||

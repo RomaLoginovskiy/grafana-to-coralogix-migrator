@@ -79,10 +79,16 @@ public static class ArgumentParser
         return new ParsedArgs(CommandKind.Interactive, dict);
     }
 
+    /// <remarks>
+    /// <c>--no-fan-out</c> is spelled as the opt-out because fan-out is on by default and
+    /// <c>convert</c> reads no settings file, so this flag is the only way to ask for the original
+    /// single-widget layout on this path.
+    /// </remarks>
     private static ParsedArgs ParseConvert(ReadOnlySpan<string> rest)
     {
         string? input = null;
         string? output = null;
+        var noFanOut = false;
 
         for (var i = 0; i < rest.Length; i++)
         {
@@ -95,6 +101,10 @@ public static class ArgumentParser
                     i++;
                 }
             }
+            else if (arg is "--no-fan-out")
+            {
+                noFanOut = true;
+            }
             else if (!arg.StartsWith('-'))
             {
                 input ??= arg;
@@ -104,7 +114,8 @@ public static class ArgumentParser
         var dict = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
             ["input"] = input,
-            ["output"] = output
+            ["output"] = output,
+            ["no-fan-out"] = noFanOut ? "true" : "false"
         };
         return new ParsedArgs(CommandKind.Convert, dict);
     }

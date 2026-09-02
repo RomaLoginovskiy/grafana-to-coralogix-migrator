@@ -33,6 +33,23 @@ public class SectionRepetitionTests
         ["current"] = new JObject { ["value"] = "a", ["text"] = "a" }
     };
 
+    private static JObject Row(int id, string title, string? repeat = null, params JObject[] collapsedChildren)
+    {
+        var row = new JObject
+        {
+            ["id"] = id,
+            ["type"] = "row",
+            ["title"] = title
+        };
+        if (repeat is not null) row["repeat"] = repeat;
+        if (collapsedChildren.Length > 0)
+        {
+            row["collapsed"] = true;
+            row["panels"] = new JArray(collapsedChildren.Cast<object>().ToArray());
+        }
+        return row;
+    }
+
     private static (JArray sections, IReadOnlyList<DashboardConversionDiagnostic> diagnostics) Convert(
         JArray panels, params JObject[] variables)
     {
@@ -172,5 +189,113 @@ public class SectionRepetitionTests
         var variable = new JObject { ["name"] = "Filters", ["type"] = type, ["multi"] = true };
 
         Assert.False(VariableConverter.WillBeMultiValue(variable));
+    }
+
+    // ── Row repeat ────────────────────────────────────────────────────────────
+    //
+    // Grafana repeats a row as well as a panel, and a row is the closer analogue of a Coralogix
+    // section. A row panel is consumed as a separator, so its repeat has to be captured during
+    // grouping — nothing downstream ever sees the row object again.
+
+    [Fact]
+    public void RepeatingRow_BecomesARepeatingSection()
+    {
+        var (sections, _) = Convert(
+            new JArray(Row(10, "Per environment", repeat: "environment"), Panel(1, "Latency")),
+            Variable("environment", multi: true));
+
+        var section = Assert.Single(sections);
+        Assert.Equal("environment", RepetitiveVar(section)?.Value<string>("name"));
+        Assert.Equal("Per environment", section["options"]?["custom"]?.Value<string>("name"));
+    }
+
+    [Fact]
+    public void RepeatingRow_CarriesEveryPanelInTheRow()
+    {
+        var (sections, _) = Convert(
+            new JArray(Row(10, "Per environment", repeat: "environment"),
+                Panel(1, "Latency"), Panel(2, "Errors")),
+            Variable("environment", multi: true));
+
+        var section = Assert.Single(sections);
+        var widgets = (section["rows"] as JArray ?? [])
+            .Children<JObject>()
+            .SelectMany(r => (r["widgets"] as JArray ?? []).Children<JObject>())
+            .ToList();
+        Assert.Equal(2, widgets.Count);
+        Assert.Equal("environment", RepetitiveVar(section)?.Value<string>("name"));
+    }
+
+    /// <remarks>
+    /// The shape in test_data/import_validation/dataacquisitions_grafana_from_prompt.json: a real
+    /// row repeat over a single-value custom variable. Grafana draws that row exactly once, so
+    /// emitting no repetition is correct — but it has to be reported, which is what was missing.
+    /// </remarks>
+    [Fact]
+    public void RowRepeatOverSingleValueVariable_IsNotEmittedAndIsReported()
+    {
+        var (sections, diagnostics) = Convert(
+            new JArray(Row(10, "Per environment", repeat: "environment"), Panel(1, "Latency")),
+            Variable("environment", multi: false));
+
+        var section = Assert.Single(sections);
+        Assert.Null(RepetitiveVar(section));
+
+        var loss = Assert.Single(diagnostics.Where(d => d.ElementKind == "rowRepeat"));
+        Assert.Equal("${environment}", loss.ElementName);
+        Assert.Equal("UNS-RPT-001", loss.Code);
+    }
+
+    [Fact]
+    public void RowRepeatOverUnknownVariable_IsReported()
+    {
+        var (sections, diagnostics) = Convert(
+            new JArray(Row(10, "Per environment", repeat: "nosuchvar"), Panel(1, "Latency")));
+
+        Assert.Null(RepetitiveVar(Assert.Single(sections)));
+        Assert.Single(diagnostics.Where(d => d.ElementKind == "rowRepeat"));
+    }
+
+    [Fact]
+    public void CollapsedRepeatingRow_StillBecomesARepeatingSection()
+    {
+        // A collapsed row nests its children, and the row itself is still discarded after they are
+        // absorbed — so the repeat must be read on that same pass or it is lost with the row.
+        var (sections, _) = Convert(
+            new JArray(Row(10, "Per environment", "environment", Panel(1, "Latency"), Panel(2, "Errors"))),
+            Variable("environment", multi: true));
+
+        var section = Assert.Single(sections);
+        Assert.Equal("environment", RepetitiveVar(section)?.Value<string>("name"));
+    }
+
+    [Fact]
+    public void NonRepeatingRow_GetsNoRepetition()
+    {
+        var (sections, diagnostics) = Convert(
+            new JArray(Row(10, "Plain row"), Panel(1, "Latency")),
+            Variable("environment", multi: true));
+
+        Assert.Null(RepetitiveVar(Assert.Single(sections)));
+        Assert.Empty(diagnostics.Where(d => d.ElementKind == "rowRepeat"));
+    }
+
+    [Fact]
+    public void PanelRepeatInsideARepeatingRow_KeepsThePanelsOwnVariable()
+    {
+        // Two nested repeats, one repetitiveVar per section: the panel's is the more specific.
+        var (sections, diagnostics) = Convert(
+            new JArray(Row(10, "Per environment", repeat: "environment"),
+                Panel(1, "Plain"), Panel(2, "Per host", repeat: "host")),
+            Variable("environment", multi: true),
+            Variable("host", multi: true));
+
+        Assert.Equal(2, sections.Count);
+        Assert.Equal("environment", RepetitiveVar(sections[0])?.Value<string>("name"));
+        Assert.Equal("host", RepetitiveVar(sections[1])?.Value<string>("name"));
+
+        var collision = Assert.Single(diagnostics.Where(d => d.ElementKind == "rowRepeat"));
+        Assert.Contains("Per host", collision.Reason);
+        Assert.Contains("${host}", collision.Reason);
     }
 }

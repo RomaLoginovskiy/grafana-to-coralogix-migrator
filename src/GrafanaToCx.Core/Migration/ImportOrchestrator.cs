@@ -199,11 +199,14 @@ public sealed class ImportOrchestrator
             try
             {
                 outcome = _transformer.Transform(json, new DashboardTransformContext(
-                    item.RelativePath, item.CxFolderId, item.DashboardNameOverride, contestedUids));
+                    item.RelativePath, item.CxFolderId, item.DashboardNameOverride, contestedUids,
+                    _settings.FanOutMultiQueryPanels));
             }
             catch (Exception ex)
             {
-                MarkFailed(entry, CheckpointStatus.FailedCritical, $"Conversion error: {ex.Message}");
+                _logger.LogError(ex, "Conversion failed for '{Title}' ({Path}).", item.Title, item.RelativePath);
+                MarkFailed(entry, CheckpointStatus.FailedCritical,
+                    $"Conversion error: {ex.GetType().Name}: {ex.Message}");
                 return [];
             }
 

@@ -30,7 +30,7 @@ public sealed class GrafanaSemanticIrBuilder : IGrafanaSemanticIrBuilder
 
     private static string ResolveSourceFamily(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (string.Equals(dsType, "prometheus", StringComparison.OrdinalIgnoreCase))
             return "metrics";
         if (string.Equals(dsType, "loki", StringComparison.OrdinalIgnoreCase))

@@ -143,6 +143,7 @@ public sealed class MigrationAssessor
         "transformation" => "transformations are not applied; numbers may differ",
         "variable" => "variables could not be converted",
         "panelRepeat" => "repeated panels are not expanded",
+        "rowRepeat" => "repeated rows are not expanded into repeating sections",
         "annotation" => "annotations are not carried across",
         "dashboardLink" => "dashboard links are not carried across",
         "panelLink" => "panel links are not carried across",

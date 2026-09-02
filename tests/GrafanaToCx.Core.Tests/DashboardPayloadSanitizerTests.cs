@@ -78,7 +78,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["dataTable"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() }
+                            ["query"] = LogsQuery()
                         }
                     }
                 }
@@ -108,7 +108,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["dataTable"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() },
+                            ["query"] = LogsQuery(),
                             ["columns"] = new JArray()
                         }
                     }
@@ -139,7 +139,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["dataTable"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() },
+                            ["query"] = LogsQuery(),
                             ["columns"] = new JArray
                             {
                                 new JObject { ["field"] = "custom.field" }
@@ -183,7 +183,7 @@ public class DashboardPayloadSanitizerTests
                                         {
                                             ["dataTable"] = new JObject
                                             {
-                                                ["query"] = new JObject { ["logs"] = new JObject() }
+                                                ["query"] = LogsQuery()
                                             }
                                         }
                                     },
@@ -193,7 +193,7 @@ public class DashboardPayloadSanitizerTests
                                         {
                                             ["dataTable"] = new JObject
                                             {
-                                                ["query"] = new JObject { ["metrics"] = new JObject() }
+                                                ["query"] = MetricsQuery()
                                             }
                                         }
                                     }
@@ -239,7 +239,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["dataTable"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() },
+                            ["query"] = LogsQuery(),
                             ["stackedGroupName"] = "widgetGroup"
                         }
                     }
@@ -271,7 +271,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["pieChart"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() }
+                            ["query"] = LogsQuery()
                         }
                     }
                 }
@@ -304,7 +304,7 @@ public class DashboardPayloadSanitizerTests
                     {
                         ["pieChart"] = new JObject
                         {
-                            ["query"] = new JObject { ["logs"] = new JObject() },
+                            ["query"] = LogsQuery(),
                             ["labelDefinition"] = new JObject
                             {
                                 ["labelSource"] = "LABEL_SOURCE_STACK",
@@ -355,7 +355,7 @@ public class DashboardPayloadSanitizerTests
                                         {
                                             ["pieChart"] = new JObject
                                             {
-                                                ["query"] = new JObject { ["logs"] = new JObject() }
+                                                ["query"] = LogsQuery()
                                             }
                                         }
                                     },
@@ -365,7 +365,7 @@ public class DashboardPayloadSanitizerTests
                                         {
                                             ["pieChart"] = new JObject
                                             {
-                                                ["query"] = new JObject { ["metrics"] = new JObject() }
+                                                ["query"] = MetricsQuery(withGroupNames: true)
                                             }
                                         }
                                     }
@@ -812,5 +812,113 @@ public class DashboardPayloadSanitizerTests
         Assert.Null(widgets[1]?["definition"]?["dataTable"]?["query"]?["logs"]?["grouping"]?["groupBys"]);
         var secondWidgetGroupNamesFields = widgets[1]?["definition"]?["dataTable"]?["query"]?["logs"]?["groupNamesFields"] as JArray;
         Assert.Null(secondWidgetGroupNamesFields);
+    }
+
+    /// <summary>
+    /// Stripping the unsupported legacy <c>dataPrime</c> branch used to leave <c>query</c> with no branch at
+    /// all, and Sanitize then threw on its own output ("exactly one branch must be active"), aborting the
+    /// upload of the whole dashboard. The text must land on the supported <c>dataprime</c> branch so the
+    /// widget still queries — the markdown copy alone is a breadcrumb, not a working query.
+    /// </summary>
+    [Fact]
+    public void Sanitize_LegacyDataPrimeOnlyQuery_IsRehomedOntoModernDataprimeBranch()
+    {
+        var dashboard = PieWidgetDashboard(new JObject
+        {
+            ["dataPrime"] = new JObject { ["value"] = "source logs | groupby payload.isEmail agg count()" }
+        });
+
+        var result = DashboardPayloadSanitizer.Sanitize(dashboard);
+
+        var query = result["layout"]?["sections"]?[0]?["rows"]?[0]?["widgets"]?[0]
+            ?["definition"]?["pieChart"]?["query"] as JObject;
+        Assert.NotNull(query);
+        Assert.Null(query["dataPrime"]);
+        Assert.Equal(
+            "source logs | groupby payload.isEmail agg count()",
+            query["dataprime"]?["dataprimeQuery"]?["text"]?.ToString());
+        Assert.IsType<JArray>(query["dataprime"]?["filters"]);
+    }
+
+    /// <summary>
+    /// A query that still has a real branch must keep it: re-homing the legacy text there too would make two
+    /// branches active at once, which the API rejects.
+    /// </summary>
+    [Fact]
+    public void Sanitize_LegacyDataPrimeAlongsideLogs_LeavesLogsBranchAlone()
+    {
+        var dashboard = PieWidgetDashboard(new JObject
+        {
+            ["logs"] = new JObject { ["filters"] = new JArray() },
+            ["dataPrime"] = new JObject { ["value"] = "source logs | agg count()" }
+        });
+
+        var result = DashboardPayloadSanitizer.Sanitize(dashboard);
+
+        var query = result["layout"]?["sections"]?[0]?["rows"]?[0]?["widgets"]?[0]
+            ?["definition"]?["pieChart"]?["query"] as JObject;
+        Assert.NotNull(query);
+        Assert.Null(query["dataPrime"]);
+        Assert.NotNull(query["logs"]);
+        Assert.Null(query["dataprime"]);
+    }
+
+    private static JObject PieWidgetDashboard(JObject query) => new()
+    {
+        ["layout"] = new JObject
+        {
+            ["sections"] = new JArray
+            {
+                new JObject
+                {
+                    ["rows"] = new JArray
+                    {
+                        new JObject
+                        {
+                            ["widgets"] = new JArray
+                            {
+                                new JObject
+                                {
+                                    ["id"] = new JObject { ["value"] = "pie-legacy" },
+                                    ["title"] = "Pie",
+                                    ["definition"] = new JObject
+                                    {
+                                        ["pieChart"] = new JObject { ["query"] = query }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    /// <summary>
+    /// A logs query shaped the way every panel converter emits one. The <c>filters</c> array is not
+    /// decoration: <see cref="GrafanaToCx.Core.Converter.Semantics.QueryShapeValidator"/> runs inside
+    /// Sanitize and rejects a logs branch without it, so a barer literal would not survive the call.
+    /// </summary>
+    private static JObject LogsQuery() => new()
+    {
+        ["logs"] = new JObject { ["filters"] = new JArray() }
+    };
+
+    /// <param name="withGroupNames">
+    /// Required for pie charts only — the API rejects a pie metrics query with empty group names,
+    /// since a pie has nothing to slice by. Bar charts, gauges and data tables accept empty grouping.
+    /// </param>
+    private static JObject MetricsQuery(bool withGroupNames = false)
+    {
+        var metrics = new JObject
+        {
+            ["promqlQuery"] = new JObject { ["value"] = "sum(up)" },
+            ["filters"] = new JArray()
+        };
+
+        if (withGroupNames)
+            metrics["groupNames"] = new JArray { "service.name" };
+
+        return new JObject { ["metrics"] = metrics };
     }
 }

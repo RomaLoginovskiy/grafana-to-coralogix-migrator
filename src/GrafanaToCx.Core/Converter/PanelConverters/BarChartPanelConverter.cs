@@ -32,8 +32,8 @@ public sealed class BarChartPanelConverter : IPanelConverter
         return new JObject
         {
             ["id"] = WidgetHelpers.IdObject(),
-            ["title"] = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}",
-            ["description"] = QueryHelpers.CleanHtml(panel.Value<string>("description") ?? string.Empty),
+            ["title"] = WidgetHelpers.ResolveTitle(panel),
+            ["description"] = WidgetHelpers.ResolveDescription(panel),
             ["definition"] = new JObject
             {
                 ["barChart"] = new JObject
@@ -41,7 +41,7 @@ public sealed class BarChartPanelConverter : IPanelConverter
                     ["query"] = barQuery,
                     ["maxBarsPerChart"] = 10,
                     ["colorScheme"] = "classic",
-                    ["unit"] = QueryHelpers.MapUnitForGauge(grafanaUnit),
+                    ["unit"] = QueryHelpers.MapUnit(grafanaUnit),
                     ["dataModeType"] = "DATA_MODE_TYPE_HIGH_UNSPECIFIED",
                     ["scaleType"] = "SCALE_TYPE_LINEAR",
                     ["sortBy"] = "SORT_BY_TYPE_VALUE",
@@ -143,7 +143,7 @@ public sealed class BarChartPanelConverter : IPanelConverter
 
     private static bool IsElasticsearchTarget(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("elasticsearch", StringComparison.OrdinalIgnoreCase) == true ||
             dsType?.Equals("opensearch", StringComparison.OrdinalIgnoreCase) == true)
             return true;

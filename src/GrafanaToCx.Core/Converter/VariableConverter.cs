@@ -12,6 +12,8 @@ public sealed class VariableConverter
         "DS_PROMETHEUS"
     };
 
+    private const string FallbackDisplayName = "Variable";
+
     private readonly ILogger _logger;
 
     public VariableConverter(ILogger logger)
@@ -177,7 +179,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -298,7 +300,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -339,7 +341,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -377,7 +379,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -442,7 +444,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -514,7 +516,7 @@ public sealed class VariableConverter
         return new JObject
         {
             ["name"] = name,
-            ["displayName"] = varToken.Value<string>("label") ?? name,
+            ["displayName"] = ResolveDisplayName(varToken, name),
             ["displayType"] = "VARIABLE_DISPLAY_TYPE_V2_LABEL_VALUE",
             ["source"] = new JObject
             {
@@ -654,6 +656,20 @@ public sealed class VariableConverter
         return values.Count > 0;
     }
 
+    /// <summary>
+    /// Coralogix rejects a variable whose display name is empty. Grafana's variable editor writes
+    /// <c>"label": ""</c> — an empty string, not a missing key — when the author leaves the Label
+    /// field blank, so a null-coalesce onto <c>name</c> never fires and the empty value ships.
+    /// Both candidates are therefore whitespace-checked before falling back.
+    /// </summary>
+    private static string ResolveDisplayName(JObject varToken, string name)
+    {
+        var label = varToken.Value<string>("label");
+        if (!string.IsNullOrWhiteSpace(label))
+            return label;
+
+        return string.IsNullOrWhiteSpace(name) ? FallbackDisplayName : name;
+    }
     private static string ExtractQueryDefinition(JToken? queryToken)
     {
         if (queryToken is not JObject queryObject)

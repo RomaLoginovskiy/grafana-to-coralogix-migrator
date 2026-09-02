@@ -1,4 +1,5 @@
 using GrafanaToCx.Core.Converter;
+using GrafanaToCx.Core.Converter.Transformations;
 using GrafanaToCx.Core.ApiClient;
 using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
@@ -12,7 +13,14 @@ public class GoldenSemanticConversionTests
     public void PieBooleanSplit_Fixture_ProducesCanonicalDataprimeBranch()
     {
         var input = TestFixtureLoader.LoadFixture("golden_pie_boolean_split.json");
-        var converter = new GrafanaToCxConverter(NullLogger<GrafanaToCxConverter>.Instance);
+
+        // Consolidation is opt-in per widget type: the converter defaults to MultiLuceneMergeOptions.Disabled,
+        // so without an allowlist the planner takes the DGR-LMG-001 "not allowlisted" exit and keeps only the
+        // first target. "piechart" is allowlisted in the shipped migration-settings.json, so this mirrors a
+        // real migration run rather than granting the test a capability the product does not have.
+        var converter = new GrafanaToCxConverter(
+            NullLogger<GrafanaToCxConverter>.Instance,
+            new MultiLuceneMergeOptions(["piechart"]));
 
         var output = converter.ConvertToJObject(input.ToString());
         var widget = ExtractFirstWidget(output);
@@ -28,7 +36,8 @@ public class GoldenSemanticConversionTests
         Assert.Contains("groupby payload.isEmail", dataprimeText);
         Assert.Contains("agg count()", dataprimeText);
 
-        Assert.Contains(converter.ConversionDiagnostics, d => d.Code == "DGR-PIE-001");
+        // DGR-LMG-000 is the planner's "merge applied" code; the two boolean targets collapsed into one query.
+        Assert.Contains(converter.ConversionDiagnostics, d => d.Code == "DGR-LMG-000");
     }
 
     [Fact]

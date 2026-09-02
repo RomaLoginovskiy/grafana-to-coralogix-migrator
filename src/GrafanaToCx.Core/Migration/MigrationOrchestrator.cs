@@ -185,7 +185,11 @@ public sealed class MigrationOrchestrator
             }
             catch (Exception ex)
             {
-                MarkFailed(entry, CheckpointStatus.FailedCritical, $"Conversion error: {ex.Message}");
+                // Logged with the exception object: the message alone loses the type and stack, which
+                // is what makes a converter crash undiagnosable from the report afterwards.
+                _logger.LogError(ex, "Conversion failed for '{Title}' ({Uid}).", entry.GrafanaTitle, entry.GrafanaUid);
+                MarkFailed(entry, CheckpointStatus.FailedCritical,
+                    $"Conversion error: {ex.GetType().Name}: {ex.Message}");
                 return;
             }
 
@@ -396,7 +400,10 @@ public sealed class MigrationOrchestrator
             Status = entry.Status,
             CxDashboardId = entry.CxDashboardId,
             ErrorMessage = entry.ErrorMessage,
-            ConversionDiagnostics = conversionDiagnostics ?? [],
-            DashboardDiagnostics = dashboardDiagnostics ?? []
+            // Copied, not aliased. The converter hands back its live backing lists and clears them
+            // on the next dashboard, while the report is not rendered until the run ends — holding
+            // the reference would make all entries show the last dashboard's diagnostics.
+            ConversionDiagnostics = conversionDiagnostics?.ToList() ?? [],
+            DashboardDiagnostics = dashboardDiagnostics?.ToList() ?? []
         };
 }

@@ -21,7 +21,8 @@ public sealed class CoralogixTransformer(IGrafanaToCxConverter converter, Dashbo
         var options = new ConversionOptions
         {
             FolderId = context.FolderId,
-            DashboardName = context.DashboardNameOverride
+            DashboardName = context.DashboardNameOverride,
+            FanOutMultiQueryPanels = context.FanOutMultiQueryPanels
         };
 
         var converted = converter.ConvertToJObject(sourceJson, options);

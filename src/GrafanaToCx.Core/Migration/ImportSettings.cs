@@ -26,6 +26,13 @@ public sealed class ImportSettings
 
     public bool IsLocked { get; init; }
 
+    /// <summary>
+    /// When true, a stat panel with several queries becomes one widget per query rather than
+    /// keeping the first and dropping the rest. On by default, matching
+    /// <see cref="Converter.ConversionOptions.FanOutMultiQueryPanels"/>.
+    /// </summary>
+    public bool FanOutMultiQueryPanels { get; init; } = true;
+
     public FolderGroupingSettings Grouping { get; init; } = new();
 }
 

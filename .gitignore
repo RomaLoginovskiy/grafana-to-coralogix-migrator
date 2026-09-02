@@ -97,3 +97,15 @@ shortcomings.md
 
 # Local working notes — references customer dashboards, keep untracked
 platform-gaps.md
+
+# Local migration settings — these carry live Grafana and Coralogix API keys.
+# Matched at any depth: the file is created wherever the CLI is run from.
+migration-settings.json
+migration-settings.*.json
+# Committed templates carry no credentials and stay tracked.
+!migration-settings.*.example.json
+
+# Local research artifacts — hand-migration benchmark against the converter.
+# Contains the customer dashboard corpus plus internal team/dashboard names,
+# same reason todo.md / shortcomings.md / platform-gaps.md stay untracked.
+research/

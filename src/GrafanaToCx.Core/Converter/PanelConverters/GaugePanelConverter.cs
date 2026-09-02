@@ -61,8 +61,8 @@ public sealed class GaugePanelConverter : IPanelConverter
         return new JObject
         {
             ["id"] = WidgetHelpers.IdObject(),
-            ["title"] = panel.Value<string>("title") is { Length: > 0 } t ? t : $"Panel #{panel.Value<int>("id")}",
-            ["description"] = QueryHelpers.CleanHtml(panel.Value<string>("description") ?? string.Empty),
+            ["title"] = WidgetHelpers.ResolveTitle(panel),
+            ["description"] = WidgetHelpers.ResolveDescription(panel),
             ["definition"] = new JObject
             {
                 ["gauge"] = new JObject
@@ -94,7 +94,7 @@ public sealed class GaugePanelConverter : IPanelConverter
 
     private static bool IsElasticsearchTarget(JObject target)
     {
-        var dsType = target["datasource"]?["type"]?.ToString();
+        var dsType = QueryHelpers.DatasourceType(target);
         if (dsType?.Equals("elasticsearch", StringComparison.OrdinalIgnoreCase) == true ||
             dsType?.Equals("opensearch", StringComparison.OrdinalIgnoreCase) == true)
             return true;
@@ -159,7 +159,12 @@ public sealed class GaugePanelConverter : IPanelConverter
 
             result.Add(new JObject
             {
-                ["from"] = step["value"]?.Type == JTokenType.Null ? 0 : (step["value"] ?? 0),
+                // Only a real number may reach a double field. Grafana writes the base step as
+                // null and, in hand-edited dashboards, an emptied threshold as "", which the API
+                // rejects with `invalid value for double field value: ""`.
+                ["from"] = step["value"] is JValue { Type: JTokenType.Integer or JTokenType.Float } numeric
+                    ? numeric
+                    : new JValue(0),
                 ["color"] = mappedColor
             });
         }

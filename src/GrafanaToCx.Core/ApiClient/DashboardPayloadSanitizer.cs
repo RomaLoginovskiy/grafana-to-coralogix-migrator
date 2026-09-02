@@ -119,7 +119,31 @@ public static class DashboardPayloadSanitizer
 
         dataPrimeQuery = value;
         query!.Property("dataPrime")?.Remove();
+        PreserveAsModernDataprimeWhenBranchless(query, value);
         return true;
+    }
+
+    /// <summary>
+    /// Removing the legacy <c>dataPrime</c> branch can leave a query with no active branch at all, which the
+    /// upload API and <see cref="QueryShapeValidator"/> both reject ("exactly one branch must be active").
+    /// When that happens the legacy text is re-homed onto the supported <c>dataprime</c> branch so the widget
+    /// keeps querying instead of shipping an empty query object. Queries that still carry a logs or metrics
+    /// branch are left alone — adding a branch there would make two active at once.
+    /// </summary>
+    private static void PreserveAsModernDataprimeWhenBranchless(JObject query, string dataPrimeQuery)
+    {
+        var hasBranch = query["logs"] is JObject
+            || query["metrics"] is JObject
+            || query["dataprime"] is JObject;
+
+        if (hasBranch)
+            return;
+
+        query["dataprime"] = new JObject
+        {
+            ["dataprimeQuery"] = new JObject { ["text"] = dataPrimeQuery },
+            ["filters"] = new JArray()
+        };
     }
 
     private static void RemovePropertiesRecursively(JToken token, string[] propertyNames)
