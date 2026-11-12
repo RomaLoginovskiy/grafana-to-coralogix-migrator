@@ -334,18 +334,15 @@ public static class AppRunner
     private static async Task<int> RunAssessFromArgs(CommandHandlers handlers, ParsedArgs parsed)
     {
         var input = parsed.Get("input");
-        if (string.IsNullOrEmpty(input))
+        if (string.IsNullOrWhiteSpace(input))
         {
-            Console.Error.WriteLine("Error: assess requires an input directory or backup .zip.");
+            Console.Error.WriteLine("Error: assess requires a directory or .zip of Grafana dashboards.");
             return 1;
         }
 
         return await handlers.RunAssessAsync(
-            input,
-            parsed.Get("output"),
-            parsed.Get("profile"),
-            parsed.Get("region"),
-            parsed.Get("format"));
+            input, parsed.Get("output"), parsed.Get("profile"), parsed.Get("region"),
+            parsed.Get("format"), parsed.GetBool("assume-queries-translated"));
     }
 
     private static async Task<int> RunBackupFromArgs(CommandHandlers handlers, ParsedArgs parsed)
@@ -355,7 +352,10 @@ public static class AppRunner
             settings,
             parsed.Get("output"),
             parsed.Get("region"),
-            parsed.GetBool("interactive"));
+            parsed.GetBool("interactive"),
+            parsed.Get("grafana-url"),
+            parsed.GetBool("tls-skip-verify"),
+            parsed.GetBool("anonymous"));
     }
 
     private static async Task<int> RunVerifyFromArgs(CommandHandlers handlers, ParsedArgs parsed)

@@ -12,10 +12,10 @@ public class GrafanaDashboardBackupServiceTests
     [Fact]
     public async Task BackupAsync_SavesEveryDashboardUnderItsFolder()
     {
-        var folders = new List<GrafanaFolder> { new(1, "uid-a", "Folder A") };
+        var folders = new List<GrafanaFolder> { new("uid-a", "Folder A") };
         var client = new FakeGrafanaClient
         {
-            DashboardsByFolder = { [1] = [new GrafanaDashboardRef("dash-1", "My Dashboard", "Folder A")] },
+            DashboardsByFolder = { ["uid-a"] = [new GrafanaDashboardRef("dash-1", "My Dashboard", "Folder A")] },
             DashboardsByUid = { ["dash-1"] = new JObject { ["uid"] = "dash-1" } }
         };
 
@@ -43,10 +43,10 @@ public class GrafanaDashboardBackupServiceTests
     {
         // Only '/' is asserted here: the rest of the sanitiser keys off
         // Path.GetInvalidFileNameChars(), which differs between Windows and Unix.
-        var folders = new List<GrafanaFolder> { new(1, "uid-a", "Platform/Ops") };
+        var folders = new List<GrafanaFolder> { new("uid-a", "Platform/Ops") };
         var client = new FakeGrafanaClient
         {
-            DashboardsByFolder = { [1] = [new GrafanaDashboardRef("dash-1", "p99/p50 latency", "Platform/Ops")] },
+            DashboardsByFolder = { ["uid-a"] = [new GrafanaDashboardRef("dash-1", "p99/p50 latency", "Platform/Ops")] },
             DashboardsByUid = { ["dash-1"] = new JObject { ["uid"] = "dash-1" } }
         };
 
@@ -68,12 +68,12 @@ public class GrafanaDashboardBackupServiceTests
     [Fact]
     public async Task BackupAsync_UnreadableDashboard_IsReportedAndManifested()
     {
-        var folders = new List<GrafanaFolder> { new(1, "uid-a", "Folder A") };
+        var folders = new List<GrafanaFolder> { new("uid-a", "Folder A") };
         var client = new FakeGrafanaClient
         {
             DashboardsByFolder =
             {
-                [1] =
+                ["uid-a"] =
                 [
                     new GrafanaDashboardRef("dash-1", "Good", "Folder A"),
                     new GrafanaDashboardRef("dash-2", "Bad", "Folder A")
@@ -111,13 +111,13 @@ public class GrafanaDashboardBackupServiceTests
     {
         var folders = new List<GrafanaFolder>
         {
-            new(1, "uid-a", "Broken"),
-            new(2, "uid-b", "Folder B")
+            new("uid-a", "Broken"),
+            new("uid-b", "Folder B")
         };
         var client = new FakeGrafanaClient
         {
-            FailingFolderIds = { 1 },
-            DashboardsByFolder = { [2] = [new GrafanaDashboardRef("dash-1", "Good", "Folder B")] },
+            FailingFolderUids = { "uid-a" },
+            DashboardsByFolder = { ["uid-b"] = [new GrafanaDashboardRef("dash-1", "Good", "Folder B")] },
             DashboardsByUid = { ["dash-1"] = new JObject { ["uid"] = "dash-1" } }
         };
 
@@ -145,8 +145,8 @@ public class GrafanaDashboardBackupServiceTests
     [Fact]
     public async Task BackupAsync_NoDashboards_WritesReadableArchiveWithManifest()
     {
-        var folders = new List<GrafanaFolder> { new(1, "uid-a", "Empty") };
-        var client = new FakeGrafanaClient { DashboardsByFolder = { [1] = [] } };
+        var folders = new List<GrafanaFolder> { new("uid-a", "Empty") };
+        var client = new FakeGrafanaClient { DashboardsByFolder = { ["uid-a"] = [] } };
 
         var path = TempZipPath("grafana-backup-empty");
         try
@@ -171,13 +171,13 @@ public class GrafanaDashboardBackupServiceTests
     [Fact]
     public async Task BackupAsync_CancellationRequested_ThrowsOperationCanceledException()
     {
-        var folders = new List<GrafanaFolder> { new(1, "uid-a", "Folder A") };
+        var folders = new List<GrafanaFolder> { new("uid-a", "Folder A") };
         var cts = new CancellationTokenSource();
         var client = new FakeGrafanaClient
         {
             DashboardsByFolder =
             {
-                [1] =
+                ["uid-a"] =
                 [
                     new GrafanaDashboardRef("dash-1", "One", "Folder A"),
                     new GrafanaDashboardRef("dash-2", "Two", "Folder A")
@@ -247,20 +247,20 @@ public class GrafanaDashboardBackupServiceTests
 
     private sealed class FakeGrafanaClient : IGrafanaClient
     {
-        public Dictionary<int, List<GrafanaDashboardRef>> DashboardsByFolder { get; } = [];
+        public Dictionary<string, List<GrafanaDashboardRef>> DashboardsByFolder { get; } = [];
         public Dictionary<string, JObject> DashboardsByUid { get; } = [];
-        public HashSet<int> FailingFolderIds { get; } = [];
+        public HashSet<string> FailingFolderUids { get; } = [];
         public Action<string>? OnGetDashboard { get; init; }
 
         public Task<List<GrafanaFolder>> GetFoldersAsync(IReadOnlyList<string> folderFilter, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
-        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(int folderId, CancellationToken ct = default)
+        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(string folderUid, CancellationToken ct = default)
         {
-            if (FailingFolderIds.Contains(folderId))
-                throw new HttpRequestException($"folder {folderId} unavailable");
+            if (FailingFolderUids.Contains(folderUid))
+                throw new HttpRequestException($"folder {folderUid} unavailable");
 
-            return Task.FromResult(DashboardsByFolder.TryGetValue(folderId, out var list) ? list : []);
+            return Task.FromResult(DashboardsByFolder.TryGetValue(folderUid, out var list) ? list : []);
         }
 
         public Task<JObject?> GetDashboardByUidAsync(string uid, CancellationToken ct = default)

@@ -47,6 +47,12 @@ public sealed record DashboardAssessment
 
     public IReadOnlyList<AssessmentFinding> Findings { get; init; } = [];
 
+    /// <summary>
+    /// Queries swapped for stand-ins because the assessment assumed they would be translated.
+    /// Informational: they do not count towards the verdict.
+    /// </summary>
+    public IReadOnlyList<AssessmentFinding> AssumedTranslated { get; init; } = [];
+
     public AssessmentVerdict Verdict =>
         ConversionError is not null ? AssessmentVerdict.Failed
         : ValidationErrors.Count > 0 ? AssessmentVerdict.Rejected

@@ -520,7 +520,9 @@ Full settings file with all available fields:
 
 | Field | Description |
 |---|---|
-| `grafana.region` | Grafana Cloud region |
+| `grafana.region` | Coralogix region whose hosted Grafana to read from |
+| `grafana.url` | Base URL of a Grafana not hosted by Coralogix (e.g. `https://grafana.example.com`); overrides `grafana.region` |
+| `grafana.tlsSkipVerify` | Accept any TLS certificate from Grafana (self-signed / private CA). Does not affect Coralogix connections |
 | `grafana.folders` | Grafana folders to migrate (empty = all) |
 | `coralogix.region` | Coralogix region (used to resolve endpoint) |
 | `coralogix.folderId` | Fallback CX folder ID when mapping is missing |
@@ -670,6 +672,31 @@ API key precedence for non-interactive `migrate`:
 1. `GRAFANA_API_KEY` / `CX_API_KEY` environment variables
 2. `credentials.grafanaApiKey` / `credentials.cxApiKey` in the settings file
 
+### `assess`
+
+Convert a set of dashboards without uploading anything, and report which come across cleanly,
+which lose something, and which Coralogix would refuse. Takes a directory of dashboard JSON or a
+`backup` ZIP:
+
+```bash
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- assess ./boards.zip -f markdown -o assessment.md
+```
+
+| Flag | Description |
+|---|---|
+| `-o`, `--output` | Also write the report to this file |
+| `-f`, `--format` | `text` (default) or `markdown` |
+| `-r`, `--region` / `-p`, `--profile` | Region and cx CLI profile for validating against the Coralogix API (skipped when `cx` is not installed) |
+| `--assume-queries-translated` | Judge only dashboard mechanics; see below |
+
+Panels whose queries target a datasource the converter does not translate (InfluxDB, CloudWatch,
+Graphite, ...) are reported as such. With `--assume-queries-translated` those queries, and query
+variables on those datasources, are replaced with stand-ins before conversion, as if the data were
+already in Coralogix under sensible names. What is left is the work for whoever migrates the
+dashboards: panel types with no equivalent, multi-query widgets, transformations, links, datasource
+picker variables and so on. Getting the data in and naming it is an integration problem the
+assessment then takes as solved.
+
 ### `backup`
 
 Download Grafana dashboards into a local ZIP and stop there — no conversion, no upload, no
@@ -685,6 +712,9 @@ dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- backup --se
 | `-s`, `--settings` | Path to migration settings JSON (default: `migration-settings.json`) |
 | `-o`, `--output` | Output ZIP path (default: `migration.backupFile`, else `grafana-backup.zip`) |
 | `-r`, `--region` | Grafana region override; also makes the settings file optional |
+| `--grafana-url` | Grafana base URL override, for a Grafana not hosted by Coralogix; also makes the settings file optional. Wins over `--region` |
+| `--tls-skip-verify` | Accept any TLS certificate from Grafana, e.g. a self-signed one (same as `grafana.tlsSkipVerify`) |
+| `--anonymous` | Send no API key, for a Grafana with anonymous access enabled. Ignores `GRAFANA_API_KEY` and `credentials.grafanaApiKey` |
 | `-I`, `--interactive` | Pick folders from a list instead of using `grafana.folders` |
 
 Archive layout matches the `migrate` backup — one JSON per dashboard, grouped by Grafana folder:
@@ -700,6 +730,26 @@ picker when `--interactive` is passed. With `--region` you can skip the settings
 ```bash
 dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- backup --region eu1 -o ./boards.zip -I
 ```
+
+To back up from a Grafana outside Coralogix (self-hosted, Grafana Cloud), pass its base URL and a
+service-account token with dashboard read access. The resulting ZIP feeds straight into `assess`:
+
+```bash
+export GRAFANA_API_KEY=glsa_xxxxxxxxxxxx
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- backup --grafana-url https://grafana.example.com -o ./boards.zip
+dotnet run --project ./src/GrafanaToCx.Cli/GrafanaToCx.Cli.csproj -- assess ./boards.zip
+```
+
+The backup only sees what the token can see. On recent Grafana a Viewer-role service account cannot
+see dashboards in the root ("General") folder, so they are silently left out; use a token whose role
+can read every folder you want. Only folders that contain dashboards are listed, nested folders included.
+
+If Grafana uses a self-signed certificate, add `--tls-skip-verify`. That turns off certificate
+checking for Grafana entirely, so a spoofed server would also be accepted. If you'd rather keep
+checking, trust the cert at OS level (macOS: add it to the System keychain as trusted) and leave the flag off.
+
+If the Grafana allows anonymous access (you can browse dashboards without logging in), pass
+`--anonymous` instead of supplying a key. The backup then gets exactly what an anonymous visitor can see.
 
 Exit code is `0` only when every discovered dashboard was written. If anything was skipped the
 command exits `1` and the archive carries a `_manifest.json` listing what failed.

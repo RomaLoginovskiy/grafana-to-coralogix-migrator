@@ -115,7 +115,7 @@ public sealed class MigrationOrchestrator
 
     private async Task ProcessFolderAsync(GrafanaFolder folder, ConversionOptions options, CancellationToken ct)
     {
-        var dashboardRefs = await _grafanaClient.GetDashboardsInFolderAsync(folder.Id, ct);
+        var dashboardRefs = await _grafanaClient.GetDashboardsInFolderAsync(folder.Uid, ct);
         _logger.LogInformation("Folder '{Folder}': {Count} dashboard(s).", folder.Title, dashboardRefs.Count);
 
         foreach (var dashRef in dashboardRefs)

@@ -137,7 +137,8 @@ public sealed class CommandHandlers
     /// Accepts a directory of dashboard JSON or a backup .zip.
     /// </summary>
     public async Task<int> RunAssessAsync(
-        string input, string? output, string? profile, string? region, string? format = null)
+        string input, string? output, string? profile, string? region, string? format = null,
+        bool assumeQueriesTranslated = false)
     {
         if (!TryParseReportFormat(format, out var reportFormat))
         {
@@ -166,14 +167,14 @@ public sealed class CommandHandlers
         if (!checker.IsInstalled)
             Console.WriteLine("cx CLI not found — assessing conversion only, without API validation.");
 
-        var assessor = new MigrationAssessor(CreateConverter(), checker);
+        var assessor = new MigrationAssessor(CreateConverter(), checker, assumeQueriesTranslated);
         var assessments = new List<DashboardAssessment>(sources.Count);
 
         Console.WriteLine($"Assessing {sources.Count} dashboard(s)...");
         foreach (var (name, json) in sources)
             assessments.Add(await assessor.AssessAsync(name, json));
 
-        var report = AssessmentReport.Build(assessments, reportFormat);
+        var report = AssessmentReport.Build(assessments, reportFormat, assumeQueriesTranslated);
         Console.WriteLine();
         Console.WriteLine(report);
 
@@ -365,9 +366,12 @@ public sealed class CommandHandlers
     /// Downloads Grafana dashboards into a local ZIP and stops there — no conversion,
     /// no Coralogix connection. This is the backup half of <c>migrate</c> on its own.
     /// </summary>
-    public async Task<int> RunBackupAsync(string settingsFile, string? output, string? regionOverride, bool interactive)
+    public async Task<int> RunBackupAsync(
+        string settingsFile, string? output, string? regionOverride, bool interactive,
+        string? grafanaUrlOverride = null, bool tlsSkipVerify = false, bool anonymous = false)
     {
         MigrationSettings settings;
+        var hasEndpointOverride = !string.IsNullOrWhiteSpace(regionOverride) || !string.IsNullOrWhiteSpace(grafanaUrlOverride);
 
         if (File.Exists(settingsFile))
         {
@@ -376,24 +380,26 @@ public sealed class CommandHandlers
                 .Build();
             settings = configuration.Get<MigrationSettings>() ?? new MigrationSettings();
         }
-        else if (!string.IsNullOrWhiteSpace(regionOverride))
+        else if (hasEndpointOverride)
         {
-            // --region makes the settings file optional: everything else backup needs has a default.
-            Console.WriteLine($"Settings file '{settingsFile}' not found — using defaults with region '{regionOverride}'.");
+            // --region / --grafana-url make the settings file optional: everything else backup needs has a default.
+            Console.WriteLine($"Settings file '{settingsFile}' not found — using defaults.");
             settings = new MigrationSettings();
         }
         else
         {
-            Console.Error.WriteLine($"Error: settings file '{settingsFile}' not found. Pass --settings <path> or --region <code>.");
+            Console.Error.WriteLine($"Error: settings file '{settingsFile}' not found. Pass --settings <path>, --region <code> or --grafana-url <url>.");
             return 1;
         }
-
-        var region = string.IsNullOrWhiteSpace(regionOverride) ? settings.Grafana.Region : regionOverride;
 
         string grafanaEndpoint;
         try
         {
-            grafanaEndpoint = RegionMapper.ResolveGrafana(region);
+            // A flag on the command line replaces the settings file's endpoint as a whole, so
+            // --region still works against a settings file that has grafana.url set.
+            grafanaEndpoint = hasEndpointOverride
+                ? RegionMapper.ResolveGrafana(grafanaUrlOverride, regionOverride ?? settings.Grafana.Region)
+                : RegionMapper.ResolveGrafana(settings.Grafana.Url, settings.Grafana.Region);
         }
         catch (ArgumentException ex)
         {
@@ -401,12 +407,15 @@ public sealed class CommandHandlers
             return 1;
         }
 
-        var grafanaApiKey = Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
-        if (string.IsNullOrWhiteSpace(grafanaApiKey))
+        // --anonymous ignores any configured key outright, so a stale or placeholder key in the
+        // settings file can't sneak in and get rejected.
+        var grafanaApiKey = anonymous ? string.Empty : Environment.GetEnvironmentVariable("GRAFANA_API_KEY");
+        if (!anonymous && string.IsNullOrWhiteSpace(grafanaApiKey))
             grafanaApiKey = settings.Credentials.GrafanaApiKey;
-        if (string.IsNullOrWhiteSpace(grafanaApiKey))
+        if (!anonymous && string.IsNullOrWhiteSpace(grafanaApiKey))
         {
-            Console.Error.WriteLine("Error: Grafana API key is required. Set GRAFANA_API_KEY or provide credentials.grafanaApiKey in settings.");
+            Console.Error.WriteLine("Error: Grafana API key is required. Set GRAFANA_API_KEY or provide credentials.grafanaApiKey in settings, "
+                                    + "or pass --anonymous for a Grafana that allows anonymous access.");
             return 1;
         }
 
@@ -419,7 +428,8 @@ public sealed class CommandHandlers
         using var grafanaClient = new GrafanaClient(
             _loggerFactory.CreateLogger<GrafanaClient>(),
             grafanaEndpoint,
-            grafanaApiKey);
+            grafanaApiKey!,
+            tlsSkipVerify || settings.Grafana.TlsSkipVerify);
 
         Console.WriteLine($"Fetching folders from {grafanaEndpoint} ...");
 
@@ -435,7 +445,11 @@ public sealed class CommandHandlers
         {
             // A rejected key can come back as a 2xx non-JSON body, which the client parses eagerly.
             Console.Error.WriteLine($"Error: could not read folders from Grafana — {ex.Message}");
-            Console.Error.WriteLine("Check that GRAFANA_API_KEY is valid for this region.");
+            Console.Error.WriteLine(ex.InnerException is System.Security.Authentication.AuthenticationException
+                ? "Grafana's TLS certificate was not trusted. For a self-signed cert, pass --tls-skip-verify."
+                : anonymous
+                    ? "This Grafana does not allow anonymous access; a token or login is needed."
+                    : "Check that GRAFANA_API_KEY (or credentials.grafanaApiKey in the settings file) is a token for this Grafana.");
             return 1;
         }
 
@@ -570,9 +584,9 @@ public sealed class CommandHandlers
         {
             cxEndpoint = cxEndpointOverride ?? RegionMapper.Resolve(settings.Coralogix.Region);
 
-            // Not overridable from the Coralogix side: grafana.region locates the *source* Grafana, a
-            // different system, so the region picked for the destination says nothing about it.
-            grafanaEndpoint = RegionMapper.ResolveGrafana(settings.Grafana.Region);
+            // Not overridable from the Coralogix side: grafana.url / grafana.region locate the *source*
+            // Grafana, a different system, so the region picked for the destination says nothing about it.
+            grafanaEndpoint = RegionMapper.ResolveGrafana(settings.Grafana.Url, settings.Grafana.Region);
         }
         catch (ArgumentException ex)
         {
@@ -583,7 +597,8 @@ public sealed class CommandHandlers
         using var grafanaClient = new GrafanaClient(
             _loggerFactory.CreateLogger<GrafanaClient>(),
             grafanaEndpoint,
-            grafanaApiKey);
+            grafanaApiKey,
+            settings.Grafana.TlsSkipVerify);
 
         using var cxFoldersClient = new CoralogixFoldersClient(
             _loggerFactory.CreateLogger<CoralogixFoldersClient>(),
@@ -820,6 +835,8 @@ public sealed class CommandHandlers
             Grafana = new GrafanaSettings
             {
                 Region = baseSettings.Grafana.Region,
+                Url = baseSettings.Grafana.Url,
+                TlsSkipVerify = baseSettings.Grafana.TlsSkipVerify,
                 Folders = selectedFolderNames
             },
             Coralogix = new CoralogixSettings

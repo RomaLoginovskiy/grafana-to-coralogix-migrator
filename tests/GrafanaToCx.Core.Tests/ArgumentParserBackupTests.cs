@@ -37,6 +37,34 @@ public class ArgumentParserBackupTests
     }
 
     [Fact]
+    public void Parse_Backup_ReadsGrafanaUrl()
+    {
+        var parsed = ArgumentParser.Parse(["backup", "--grafana-url", "https://grafana.example.com"]);
+
+        Assert.Equal("https://grafana.example.com", parsed.Get("grafana-url"));
+    }
+
+    [Fact]
+    public void Parse_Backup_GrafanaUrlDefaultsToNull()
+    {
+        Assert.Null(ArgumentParser.Parse(["backup"]).Get("grafana-url"));
+    }
+
+    [Fact]
+    public void Parse_Backup_TlsSkipVerifyIsOffUnlessPassed()
+    {
+        Assert.False(ArgumentParser.Parse(["backup"]).GetBool("tls-skip-verify"));
+        Assert.True(ArgumentParser.Parse(["backup", "--tls-skip-verify"]).GetBool("tls-skip-verify"));
+    }
+
+    [Fact]
+    public void Parse_Backup_AnonymousIsOffUnlessPassed()
+    {
+        Assert.False(ArgumentParser.Parse(["backup"]).GetBool("anonymous"));
+        Assert.True(ArgumentParser.Parse(["backup", "--anonymous"]).GetBool("anonymous"));
+    }
+
+    [Fact]
     public void Parse_Backup_IsCaseInsensitive()
     {
         Assert.Equal(CommandKind.Backup, ArgumentParser.Parse(["BACKUP"]).Command);

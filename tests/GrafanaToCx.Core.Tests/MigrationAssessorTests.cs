@@ -208,4 +208,91 @@ public class MigrationAssessorTests
         Assert.True(report.IndexOf("Degraded board", StringComparison.Ordinal)
                     < report.IndexOf("Clean board", StringComparison.Ordinal));
     }
+
+    // InfluxDB builder-mode target, datasource named by string with no type — the common shape in
+    // older dashboards, which the converter used to drop silently or give the placeholder `up`.
+    private static JObject InfluxGraph(string title, params string[] refIds) => new()
+    {
+        ["id"] = 1,
+        ["type"] = "graph",
+        ["title"] = title,
+        ["datasource"] = "ESB-PROD - Default",
+        ["targets"] = new JArray(refIds.Select(r => (object)new JObject
+        {
+            ["refId"] = r,
+            ["measurement"] = "cpu",
+            ["policy"] = "default",
+            ["select"] = JArray.Parse("""[[{"type":"field","params":["usage_user"]},{"type":"mean","params":[]}]]"""),
+            ["tags"] = new JArray(),
+            ["groupBy"] = JArray.Parse("""[{"type":"time","params":["$__interval"]}]""")
+        }).ToArray())
+    };
+
+    private static Task<DashboardAssessment> AssessAssumingQueries(JObject dashboard) =>
+        new MigrationAssessor(new GrafanaToCxConverter(NullLogger<GrafanaToCxConverter>.Instance), assumeQueriesTranslated: true)
+            .AssessAsync("board.json", dashboard.ToString());
+
+    [Fact]
+    public async Task UntranslatedQuery_IsReportedNotClean()
+    {
+        var assessment = await Assess(Dashboard("Board", InfluxGraph("CPU", "A")));
+
+        Assert.Equal(AssessmentVerdict.Degraded, assessment.Verdict);
+        var finding = Assert.Single(assessment.Findings);
+        Assert.Equal("panels query InfluxDB, which is not translated", finding.Detail);
+        Assert.Empty(assessment.AssumedTranslated);
+    }
+
+    [Fact]
+    public async Task AssumeQueriesTranslated_JudgesOnlyMechanics()
+    {
+        var assessment = await AssessAssumingQueries(Dashboard("Board", InfluxGraph("CPU", "A")));
+
+        Assert.Equal(AssessmentVerdict.Clean, assessment.Verdict);
+        Assert.Equal(1, assessment.WidgetCount);
+        Assert.Equal(1, Assert.Single(assessment.AssumedTranslated).Count);
+    }
+
+    [Fact]
+    public async Task AssumeQueriesTranslated_StillReportsMultiQueryLoss()
+    {
+        var gauge = InfluxGraph("Load", "A", "B");
+        gauge["type"] = "gauge";
+
+        var assessment = await AssessAssumingQueries(Dashboard("Board", gauge));
+
+        Assert.Contains(assessment.Findings, f => f.Category == "queries dropped");
+    }
+
+    [Fact]
+    public async Task AssumeQueriesTranslated_StandsInForInfluxVariables_ButNotDatasourcePickers()
+    {
+        var dashboard = Dashboard("Board", InfluxGraph("CPU", "A"));
+        dashboard["templating"] = JObject.Parse("""
+            {"list":[
+              {"name":"host","type":"query","datasource":"$environment","query":"SHOW TAG VALUES FROM \"cpu\" WITH KEY = \"host\""},
+              {"name":"environment","type":"datasource","query":"influxdb"}
+            ]}
+            """);
+
+        var assessment = await AssessAssumingQueries(dashboard);
+
+        var variables = Assert.Single(assessment.Findings);
+        Assert.Equal("variables could not be converted", variables.Detail);
+        Assert.Equal(1, variables.Count);
+        Assert.Contains(assessment.AssumedTranslated, f => f.Detail.StartsWith("variables query InfluxDB"));
+    }
+
+    [Fact]
+    public async Task Report_SaysWhenQueriesWereAssumedTranslated()
+    {
+        var assessment = await AssessAssumingQueries(Dashboard("Board", InfluxGraph("CPU", "A")));
+
+        var text = AssessmentReport.Build([assessment], AssessmentReportFormat.Text, assumeQueriesTranslated: true);
+        var markdown = AssessmentReport.Build([assessment], AssessmentReportFormat.Markdown, assumeQueriesTranslated: true);
+
+        Assert.Contains("queries assumed translated", text);
+        Assert.Contains("Queries assumed translated", markdown);
+        Assert.DoesNotContain("assumed translated", AssessmentReport.Build([assessment]));
+    }
 }

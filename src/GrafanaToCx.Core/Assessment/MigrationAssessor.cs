@@ -15,11 +15,20 @@ public sealed class MigrationAssessor
 {
     private readonly IGrafanaToCxConverter _converter;
     private readonly CxCliDashboardChecker? _checker;
+    private readonly bool _assumeQueriesTranslated;
 
-    public MigrationAssessor(IGrafanaToCxConverter converter, CxCliDashboardChecker? checker = null)
+    /// <param name="assumeQueriesTranslated">
+    /// Judge only dashboard mechanics: queries for datasources the converter does not translate
+    /// are swapped for stand-ins first, as if the data had been migrated and named sensibly.
+    /// </param>
+    public MigrationAssessor(
+        IGrafanaToCxConverter converter,
+        CxCliDashboardChecker? checker = null,
+        bool assumeQueriesTranslated = false)
     {
         _converter = converter;
         _checker = checker;
+        _assumeQueriesTranslated = assumeQueriesTranslated;
     }
 
     public async Task<DashboardAssessment> AssessAsync(
@@ -49,6 +58,19 @@ public sealed class MigrationAssessor
 
         var panelCount = CountPanels(sourceDashboard);
 
+        IReadOnlyList<AssessmentFinding> untranslated = [];
+        IReadOnlyList<AssessmentFinding> assumedTranslated = [];
+        if (_assumeQueriesTranslated)
+        {
+            assumedTranslated = [..ForeignQueries.CountPanels(sourceDashboard), ..ForeignQueries.CountVariables(sourceDashboard)];
+            grafanaJson = ForeignQueries.AssumeTranslated(sourceDashboard).ToString(Formatting.None);
+        }
+        else
+        {
+            // Variables are already reported, generically, by the converter's own diagnostics.
+            untranslated = ForeignQueries.CountPanels(sourceDashboard);
+        }
+
         JObject converted;
         try
         {
@@ -65,7 +87,7 @@ public sealed class MigrationAssessor
             };
         }
 
-        var findings = CollectFindings();
+        var findings = untranslated.Concat(CollectFindings()).ToList();
 
         var validationErrors = Array.Empty<CxCheckIssue>() as IReadOnlyList<CxCheckIssue>;
         var validationRan = false;
@@ -84,6 +106,7 @@ public sealed class MigrationAssessor
             PanelCount = panelCount,
             WidgetCount = CountWidgets(converted),
             Findings = findings,
+            AssumedTranslated = assumedTranslated,
             ValidationErrors = validationErrors,
             ValidationRan = validationRan
         };

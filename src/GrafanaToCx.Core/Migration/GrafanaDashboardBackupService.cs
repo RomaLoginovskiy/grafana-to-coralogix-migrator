@@ -49,7 +49,7 @@ public sealed class GrafanaDashboardBackupService
             List<GrafanaDashboardRef> dashboards;
             try
             {
-                dashboards = await _grafanaClient.GetDashboardsInFolderAsync(folder.Id, ct);
+                dashboards = await _grafanaClient.GetDashboardsInFolderAsync(folder.Uid, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

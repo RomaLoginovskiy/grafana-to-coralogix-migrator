@@ -29,6 +29,19 @@ public sealed class MigrationCredentialsSettings
 public sealed class GrafanaSettings
 {
     public string Region { get; init; } = "eu2";
+
+    /// <summary>
+    /// Base URL of a Grafana not hosted by Coralogix (e.g. https://grafana.example.com).
+    /// When set, it is used instead of <see cref="Region"/>, which only knows Coralogix-hosted Grafana.
+    /// </summary>
+    public string? Url { get; init; }
+
+    /// <summary>
+    /// Accept any TLS certificate from Grafana, e.g. a self-signed one on a self-hosted instance.
+    /// Named after Grafana's own datasource option. Never applies to Coralogix connections.
+    /// </summary>
+    public bool TlsSkipVerify { get; init; }
+
     public List<string> Folders { get; init; } = [];
 }
 

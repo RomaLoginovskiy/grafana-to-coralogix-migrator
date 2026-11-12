@@ -190,9 +190,9 @@ public sealed class MigrationOrchestratorOverwriteTests
         public int GetDashboardByUidCallCount { get; private set; }
 
         public Task<List<GrafanaFolder>> GetFoldersAsync(IReadOnlyList<string> folderFilter, CancellationToken ct = default) =>
-            Task.FromResult(new List<GrafanaFolder> { new(1, "folder-uid-1", TestHarness.FolderTitle) });
+            Task.FromResult(new List<GrafanaFolder> { new("folder-uid-1", TestHarness.FolderTitle) });
 
-        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(int folderId, CancellationToken ct = default) =>
+        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(string folderUid, CancellationToken ct = default) =>
             Task.FromResult(new List<GrafanaDashboardRef> { new(TestHarness.DashboardUid, TestHarness.DashboardTitle, TestHarness.FolderTitle) });
 
         public Task<JObject?> GetDashboardByUidAsync(string uid, CancellationToken ct = default)

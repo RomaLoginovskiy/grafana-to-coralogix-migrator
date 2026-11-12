@@ -10,23 +10,25 @@ public static class AssessmentReport
 {
     public static string Build(
         IReadOnlyList<DashboardAssessment> assessments,
-        AssessmentReportFormat format = AssessmentReportFormat.Text)
+        AssessmentReportFormat format = AssessmentReportFormat.Text,
+        bool assumeQueriesTranslated = false)
     {
         var sb = new StringBuilder();
 
         if (format == AssessmentReportFormat.Markdown)
         {
-            AppendMarkdown(sb, assessments);
+            AppendMarkdown(sb, assessments, assumeQueriesTranslated);
             return sb.ToString();
         }
 
-        AppendSummary(sb, assessments);
+        AppendSummary(sb, assessments, assumeQueriesTranslated);
         AppendCommonProblems(sb, assessments);
         AppendPerDashboard(sb, assessments);
         return sb.ToString();
     }
 
-    private static void AppendMarkdown(StringBuilder sb, IReadOnlyList<DashboardAssessment> assessments)
+    private static void AppendMarkdown(
+        StringBuilder sb, IReadOnlyList<DashboardAssessment> assessments, bool assumeQueriesTranslated)
     {
         var byVerdict = assessments.GroupBy(a => a.Verdict).ToDictionary(g => g.Key, g => g.Count());
         int Count(AssessmentVerdict v) => byVerdict.GetValueOrDefault(v);
@@ -49,6 +51,16 @@ public static class AssessmentReport
         {
             sb.AppendLine("> The cx CLI was not available, so nothing was validated against the "
                           + "Coralogix API. Problems the API would reject are not included.");
+            sb.AppendLine();
+        }
+
+        if (assumeQueriesTranslated)
+        {
+            sb.AppendLine("> **Queries assumed translated.** Queries for datasources the converter does not "
+                          + "translate were replaced with stand-ins, as if the data were already in Coralogix "
+                          + "under sensible names. Only dashboard mechanics are judged below.");
+            foreach (var line in AssumedTotals(assessments))
+                sb.AppendLine($"> - {line}");
             sb.AppendLine();
         }
 
@@ -89,10 +101,19 @@ public static class AssessmentReport
         sb.AppendLine();
     }
 
+    /// <summary>e.g. "1650 InfluxDB panels stood in", summed across dashboards.</summary>
+    private static IEnumerable<string> AssumedTotals(IReadOnlyList<DashboardAssessment> assessments) =>
+        assessments
+            .SelectMany(a => a.AssumedTranslated)
+            .GroupBy(f => f.Detail)
+            .Select(g => $"{g.Sum(f => f.Count)} {g.Key}")
+            .OrderBy(s => s);
+
     /// <summary>A pipe in a title would split the markdown table cell.</summary>
     private static string Escape(string value) => value.Replace("|", "\\|");
 
-    private static void AppendSummary(StringBuilder sb, IReadOnlyList<DashboardAssessment> assessments)
+    private static void AppendSummary(
+        StringBuilder sb, IReadOnlyList<DashboardAssessment> assessments, bool assumeQueriesTranslated)
     {
         var byVerdict = assessments.GroupBy(a => a.Verdict).ToDictionary(g => g.Key, g => g.Count());
         int Count(AssessmentVerdict v) => byVerdict.GetValueOrDefault(v);
@@ -117,6 +138,15 @@ public static class AssessmentReport
             sb.AppendLine();
             sb.AppendLine("Note: the cx CLI was not available, so no dashboard was validated against the");
             sb.AppendLine("      Coralogix API. Problems the API would reject are not included below.");
+        }
+
+        if (assumeQueriesTranslated)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Mode: queries assumed translated. Queries for datasources the converter does not");
+            sb.AppendLine("      translate were replaced with stand-ins; only dashboard mechanics are judged.");
+            foreach (var line in AssumedTotals(assessments))
+                sb.AppendLine($"      - {line}");
         }
 
         sb.AppendLine();

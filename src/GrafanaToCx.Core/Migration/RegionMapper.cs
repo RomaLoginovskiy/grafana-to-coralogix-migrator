@@ -54,4 +54,21 @@ public static class RegionMapper
     /// Example: eu1 → https://api.coralogix.com/grafana
     /// </summary>
     public static string ResolveGrafana(string region) => $"{GetBaseUrl(region)}/grafana";
+
+    /// <summary>
+    /// Returns <paramref name="url"/> when given (a Grafana outside Coralogix), else the
+    /// Coralogix-hosted Grafana for <paramref name="region"/>.
+    /// </summary>
+    public static string ResolveGrafana(string? url, string region)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return ResolveGrafana(region);
+
+        // Validated here so callers' existing ArgumentException handling reports it, rather than
+        // GrafanaClient's Uri constructor throwing a UriFormatException later.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            throw new ArgumentException($"Grafana URL '{url}' is not an absolute http(s) URL.");
+
+        return url.TrimEnd('/');
+    }
 }

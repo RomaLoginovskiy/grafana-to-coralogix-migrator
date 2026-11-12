@@ -121,9 +121,9 @@ public sealed class MigrationReportDiagnosticsTests
     private sealed class TwoDashboardGrafanaClient : IGrafanaClient
     {
         public Task<List<GrafanaFolder>> GetFoldersAsync(IReadOnlyList<string> folderFilter, CancellationToken ct = default) =>
-            Task.FromResult(new List<GrafanaFolder> { new(1, "folder-uid-1", "Folder A") });
+            Task.FromResult(new List<GrafanaFolder> { new("folder-uid-1", "Folder A") });
 
-        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(int folderId, CancellationToken ct = default) =>
+        public Task<List<GrafanaDashboardRef>> GetDashboardsInFolderAsync(string folderUid, CancellationToken ct = default) =>
             Task.FromResult(new List<GrafanaDashboardRef>
             {
                 new("uid-alpha", "Dashboard Alpha", "Folder A"),
