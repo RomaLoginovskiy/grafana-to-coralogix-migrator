@@ -672,6 +672,20 @@ API key precedence for non-interactive `migrate`:
 1. `GRAFANA_API_KEY` / `CX_API_KEY` environment variables
 2. `credentials.grafanaApiKey` / `credentials.cxApiKey` in the settings file
 
+### Assessing a Grafana in one step
+
+`scripts/assess-grafana.sh` backs up every dashboard from a Grafana and runs `assess` twice, once
+as things stand and once with `--assume-queries-translated`:
+
+```bash
+export GRAFANA_API_KEY=glsa_xxxxxxxxxxxx    # omit for a Grafana with anonymous access
+./scripts/assess-grafana.sh https://grafana.example.com            # add -k for a self-signed cert
+```
+
+It writes `boards.zip`, `assessment.md` and `assessment-assumed.md` (plus logs) to
+`./assessment-<host>-<date>/`, or wherever `-o` says, and prints the verdict counts of both.
+It ignores any `migration-settings.json` elsewhere, so a placeholder key there can't get in the way.
+
 ### `assess`
 
 Convert a set of dashboards without uploading anything, and report which come across cleanly,
